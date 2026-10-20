@@ -199,3 +199,29 @@ func TestDiagnosticsWrapWithIndent(t *testing.T) {
 		}
 	}
 }
+
+func TestSharedFolderCannotOverlapInstallDirectory(t *testing.T) {
+	base := `C:\Tools\PortableTailscale`
+	for _, folder := range []string{base, `C:\Tools\PortableTailscale\data`, `C:\Tools\PortableTailscale\freerdp`, `C:\Tools`, `c:\tools\portabletailscale`} {
+		if err := checkSharedFolder(folder, base); err == nil {
+			t.Errorf("accepted shared folder %q overlapping %q", folder, base)
+		}
+	}
+	for _, folder := range []string{`C:\Tools\Other`, `C:\Tools\PortableTailscale2`, `D:\Share`} {
+		if err := checkSharedFolder(folder, base); err != nil {
+			t.Errorf("rejected unrelated shared folder %q: %v", folder, err)
+		}
+	}
+}
+
+func TestValidateRejectsSharingOwnExecutableDirectory(t *testing.T) {
+	base, err := executableDirectory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := defaultRDPOptions()
+	o.Folder = base
+	if err := validateRDPOptions(o); err == nil {
+		t.Fatal("accepted the launcher directory as a shared folder")
+	}
+}
