@@ -281,8 +281,38 @@ func validateRDPOptions(o rdpOptions) error {
 		if err != nil || !info.IsDir() {
 			return fmt.Errorf("shared folder must be an existing directory")
 		}
+		if base, err := executableDirectory(); err == nil {
+			if err := checkSharedFolder(o.Folder, base); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
+}
+
+// checkSharedFolder rejects sharing the launcher directory, anything inside it,
+// or a parent of it. FreeRDP drive redirection writes with the user's token, so
+// the remote host could otherwise plant a child executable or profile.
+func checkSharedFolder(folder, base string) error {
+	// Resolve junctions and 8.3 spellings before comparing the two trees.
+	if resolved, err := filepath.EvalSymlinks(folder); err == nil {
+		folder = resolved
+	}
+	if resolved, err := filepath.EvalSymlinks(base); err == nil {
+		base = resolved
+	}
+	if pathWithin(folder, base) || pathWithin(base, folder) {
+		return fmt.Errorf("shared folder cannot overlap the PortableTailscale directory")
+	}
+	return nil
+}
+
+// pathWithin reports whether child is parent itself or below it, ignoring case
+// because Windows paths are case-insensitive.
+func pathWithin(child, parent string) bool {
+	child = strings.ToLower(filepath.Clean(child))
+	parent = strings.ToLower(filepath.Clean(parent))
+	return child == parent || strings.HasPrefix(child, parent+string(filepath.Separator))
 }
 func optionArgs(o rdpOptions) []string {
 	args := []string{"/cert:" + o.Certificate, "/scale-desktop:" + o.Scale, "/network:" + o.Network, "/timeout:" + o.Timeout}
