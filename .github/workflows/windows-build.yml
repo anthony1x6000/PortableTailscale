@@ -3,6 +3,7 @@ name: Windows Build
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -22,13 +23,22 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
+        env:
+          REQUIRE_NODE: "1"
+
       - name: Build
         run: |
           go build -tags=ts_omit_logtail -trimpath -ldflags="-s -w" -o PortableTailscale.exe .
           go build -trimpath -ldflags="-s -w" -o PortableTailscaleRDP.exe ./cmd/tui
-
-      - name: Test
-        run: go test ./cmd/tui
 
       - name: Smoke test
         run: .\PortableTailscaleRDP.exe --smoke-test
@@ -40,3 +50,19 @@ jobs:
             PortableTailscale.exe
             PortableTailscaleRDP.exe
           if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: PortableTailscale-windows-amd64
+          path: dist
+
+      - run: gh release create "$GITHUB_REF_NAME" dist/*.exe --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
