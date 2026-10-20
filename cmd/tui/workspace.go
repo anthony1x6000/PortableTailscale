@@ -15,6 +15,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+
+	"portabletailscale/internal/private"
 )
 
 type profile struct {
@@ -51,6 +53,9 @@ func saveProfiles(path string, profiles []profile) error {
 	if err = os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
+	// Best effort: FAT/exFAT has no ACLs, so the folder is only as private as
+	// the medium; NTFS gets owner-only access instead of the inherited folder ACL.
+	_ = private.Dir(filepath.Dir(path))
 	f, err := os.CreateTemp(filepath.Dir(path), ".profiles-*.tmp")
 	if err != nil {
 		return err
@@ -168,9 +173,11 @@ func (m model) updateScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.status = "Error: export diagnostics: " + err.Error()
 				return m, nil
 			}
+			_ = private.Dir(filepath.Dir(path))
 			if err := os.WriteFile(path, []byte(strings.Join(m.logs, "\n")+"\n"), 0600); err != nil {
 				m.status = "Error: export diagnostics: " + err.Error()
 			} else {
+				_ = private.File(path)
 				m.status = "Exported " + filepath.Base(path) + " in data/"
 			}
 			return m, nil
