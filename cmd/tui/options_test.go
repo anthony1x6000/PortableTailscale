@@ -251,3 +251,11 @@ func TestValidateRejectsSharingOwnExecutableDirectory(t *testing.T) {
 		t.Fatal("accepted the launcher directory as a shared folder")
 	}
 }
+
+func TestValidateRejectsRelativeSharedFolder(t *testing.T) {
+	o := defaultRDPOptions()
+	o.Folder = "data"
+	if err := validateRDPOptions(o); err == nil {
+		t.Fatal("accepted a relative shared folder")
+	}
+}

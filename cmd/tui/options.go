@@ -277,6 +277,11 @@ func validateRDPOptions(o rdpOptions) error {
 		if strings.ContainsAny(o.Folder, "\r\n,\"") {
 			return fmt.Errorf("shared folder cannot contain commas, quotes or line breaks")
 		}
+		// FreeRDP runs in its own directory, so a relative value would resolve
+		// somewhere other than the path checkSharedFolder approved.
+		if !filepath.IsAbs(o.Folder) {
+			return fmt.Errorf("shared folder must be an absolute path")
+		}
 		info, err := os.Stat(o.Folder)
 		if err != nil || !info.IsDir() {
 			return fmt.Errorf("shared folder must be an existing directory")
