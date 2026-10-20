@@ -26,8 +26,8 @@ localhost port and password are generated each time PortableTailscale starts.
 ## RDP example
 
 `PortableTailscaleRDP.exe` is an example client included with the project. It
-starts PortableTailscale, creates a local bridge, and opens the bundled FreeRDP
-client.
+starts PortableTailscale and opens the bundled FreeRDP client through the
+authenticated SOCKS5 proxy.
 
 1. Place `PortableTailscaleRDP.exe` beside `PortableTailscale.exe`.
 2. Put `sdl-freerdp.exe` in the `freerdp` folder. Download the official

@@ -18,9 +18,9 @@ func TestBuildRDPArgs(t *testing.T) {
 		password:   "not-on-command-line",
 		clipboard:  false,
 		fullscreen: true,
-	}, "127.0.0.1:49152")
+	}, "home:3389", "socks5://tsnet:proxysecret@127.0.0.1:49152")
 	want := []string{
-		"/v:127.0.0.1:49152",
+		"/v:home:3389",
 		"/server-name:home",
 		"/cert:ignore",
 		"/dynamic-resolution",
@@ -30,6 +30,7 @@ func TestBuildRDPArgs(t *testing.T) {
 		"/d:DOMAIN",
 		"-clipboard",
 		"/f",
+		"/proxy:socks5://tsnet:proxysecret@127.0.0.1:49152",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("arguments mismatch\n got: %#v\nwant: %#v", got, want)
@@ -99,5 +100,17 @@ func TestPasswordIsMasked(t *testing.T) {
 	m.inputs[passwordField].SetValue("very-secret")
 	if strings.Contains(m.View(), "very-secret") {
 		t.Fatal("password is visible in the TUI")
+	}
+}
+
+func TestRDPProxyArgument(t *testing.T) {
+	got, err := rdpProxyArgument("socks5://tsnet:0123456789abcdef@127.0.0.1:4567")
+	if err != nil || got != "socks5://tsnet:0123456789abcdef@127.0.0.1:4567" {
+		t.Fatalf("rdpProxyArgument = %q, %v", got, err)
+	}
+	for _, bad := range []string{"http://127.0.0.1:1", "socks5://127.0.0.1:1", "socks5://tsnet@127.0.0.1:1", "::"} {
+		if _, err := rdpProxyArgument(bad); err == nil {
+			t.Fatalf("accepted unauthenticated proxy URL %q", bad)
+		}
 	}
 }
