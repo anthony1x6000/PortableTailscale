@@ -63,7 +63,7 @@ func TestAdvancedArgumentsAndProfiles(t *testing.T) {
 	if opts.Dynamic || opts.Scale != "150" || opts.Folder != folder || !opts.Sound {
 		t.Fatal("advanced profile failed to round-trip")
 	}
-	args := buildRDPArgs(sessionConfig{target: "host", username: "user", options: &opts}, "127.0.0.1:1234")
+	args := buildRDPArgs(sessionConfig{target: "host", username: "user", options: &opts}, "host:3389", "socks5://tsnet:secret@127.0.0.1:1234")
 	has := func(want string) bool {
 		for _, a := range args {
 			if a == want {
