@@ -40,7 +40,10 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
+      # The Playwright harness lives in test/ next to browser.mjs.
       - run: npm install --no-package-lock --no-audit --no-fund --ignore-scripts
+        working-directory: test
       - run: sudo apt-get update && sudo apt-get install -y xvfb
       - run: npx playwright install --with-deps chromium
+        working-directory: test
       - run: BROWSER_TEST=1 REQUIRE_NODE=1 xvfb-run -a go test -run TestChromiumBrowser -v .
