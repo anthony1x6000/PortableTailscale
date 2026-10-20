@@ -281,10 +281,12 @@ func validateRDPOptions(o rdpOptions) error {
 		if err != nil || !info.IsDir() {
 			return fmt.Errorf("shared folder must be an existing directory")
 		}
-		if base, err := executableDirectory(); err == nil {
-			if err := checkSharedFolder(o.Folder, base); err != nil {
-				return err
-			}
+		base, err := executableDirectory()
+		if err != nil {
+			return fmt.Errorf("locate launcher directory: %w", err)
+		}
+		if err := checkSharedFolder(o.Folder, base); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -294,12 +296,20 @@ func validateRDPOptions(o rdpOptions) error {
 // or a parent of it. FreeRDP drive redirection writes with the user's token, so
 // the remote host could otherwise plant a child executable or profile.
 func checkSharedFolder(folder, base string) error {
-	// Resolve junctions and 8.3 spellings before comparing the two trees.
-	if resolved, err := filepath.EvalSymlinks(folder); err == nil {
-		folder = resolved
+	folder, err := filepath.Abs(folder)
+	if err != nil {
+		return fmt.Errorf("resolve shared folder: %w", err)
 	}
-	if resolved, err := filepath.EvalSymlinks(base); err == nil {
-		base = resolved
+	base, err = filepath.Abs(base)
+	if err != nil {
+		return fmt.Errorf("resolve launcher directory: %w", err)
+	}
+	// Resolve junctions and 8.3 spellings before comparing the two trees.
+	if folder, err = filepath.EvalSymlinks(folder); err != nil {
+		return fmt.Errorf("resolve shared folder: %w", err)
+	}
+	if base, err = filepath.EvalSymlinks(base); err != nil {
+		return fmt.Errorf("resolve launcher directory: %w", err)
 	}
 	if pathWithin(folder, base) || pathWithin(base, folder) {
 		return fmt.Errorf("shared folder cannot overlap the PortableTailscale directory")
@@ -310,9 +320,13 @@ func checkSharedFolder(folder, base string) error {
 // pathWithin reports whether child is parent itself or below it, ignoring case
 // because Windows paths are case-insensitive.
 func pathWithin(child, parent string) bool {
-	child = strings.ToLower(filepath.Clean(child))
-	parent = strings.ToLower(filepath.Clean(parent))
-	return child == parent || strings.HasPrefix(child, parent+string(filepath.Separator))
+	// Rel handles roots correctly, unlike a prefix test that appends a
+	// separator to C:\ and then misses every child of the drive.
+	rel, err := filepath.Rel(strings.ToLower(filepath.Clean(parent)), strings.ToLower(filepath.Clean(child)))
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 func optionArgs(o rdpOptions) []string {
 	args := []string{"/cert:" + o.Certificate, "/scale-desktop:" + o.Scale, "/network:" + o.Network, "/timeout:" + o.Timeout}

@@ -127,12 +127,19 @@ func TestUnreadableProfilesNotOverwritten(t *testing.T) {
 }
 
 func TestDiagnosticRedactionAcrossWrites(t *testing.T) {
+	// A short secret that is a substring of a longer one must not leave the
+	// remainder of the longer value behind.
+	if got := redact("abcdef", "abc", "abcdef"); got != "[redacted]" {
+		t.Fatalf("redact left a secret suffix: %q", got)
+	}
 	events := make(chan sessionEvent, 8)
 	w := newDiagnosticWriter("FreeRDP", "secret-password", events)
+	w.AddSecret("proxy-secret")
 	w.Write([]byte("failed secret-"))
-	w.Write([]byte("password socks5://tsnet:token@localhost https://login.tailscale.com/a/token\n"))
+	w.Write([]byte("password proxy-"))
+	w.Write([]byte("secret socks5://tsnet:token@localhost https://login.tailscale.com/a/token\n"))
 	msg := <-events
-	if strings.Contains(msg.log, "secret-password") || strings.Contains(msg.log, "token") {
+	if strings.Contains(msg.log, "secret-password") || strings.Contains(msg.log, "proxy-secret") || strings.Contains(msg.log, "token") {
 		t.Fatal("secret leaked")
 	}
 	w.Write([]byte(strings.Repeat("x", 9000) + "\n"))

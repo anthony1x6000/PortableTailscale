@@ -618,6 +618,18 @@ func runSession(ctx context.Context, config sessionConfig, events chan<- session
 	rdp.Dir = filepath.Dir(freeRDPPath)
 	rdp.Stdin = strings.NewReader(strings.Join(buildRDPArgs(config, rdpAddress(config.target), proxyArg), "\n") + "\n")
 	logs := newDiagnosticWriter("FreeRDP", config.password, events)
+	if u, err := url.Parse(proxyArg); err == nil {
+		if password, ok := u.User.Password(); ok {
+			logs.AddSecret(password)
+			// FreeRDP may log the userinfo in its escaped form.
+			if userinfo := u.User.String(); userinfo != "" {
+				logs.AddSecret(userinfo)
+				if _, encoded, ok := strings.Cut(userinfo, ":"); ok {
+					logs.AddSecret(encoded)
+				}
+			}
+		}
+	}
 	rdp.Stdout = logs
 	rdp.Stderr = logs
 	if err = rdp.Start(); err != nil {
@@ -722,14 +734,15 @@ func buildRDPArgs(config sessionConfig, endpoint, proxyArg string) []string {
 func rdpProxyArgument(proxyURL string) (string, error) {
 	u, err := url.Parse(proxyURL)
 	if err != nil {
-		return "", fmt.Errorf("parse SOCKS URL: %w", err)
+		// url.Error embeds the raw URL, which contains the proxy password.
+		return "", fmt.Errorf("invalid SOCKS proxy URL")
 	}
 	password, hasPassword := "", false
 	if u.User != nil {
 		password, hasPassword = u.User.Password()
 	}
 	if u.Scheme != "socks5" || u.Host == "" || u.User == nil || !hasPassword || password == "" {
-		return "", fmt.Errorf("unsupported SOCKS URL %q", proxyURL)
+		return "", fmt.Errorf("unsupported SOCKS URL %q", u.Redacted())
 	}
 	return u.String(), nil
 }
