@@ -15,7 +15,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/list"
@@ -24,7 +23,6 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	xproxy "golang.org/x/net/proxy"
 )
 
 type proxyEvent struct {
@@ -608,18 +606,17 @@ func runSession(ctx context.Context, config sessionConfig, events chan<- session
 		finalErr = err
 		return
 	}
-	events <- sessionEvent{stage: "Preparing bridge", status: "Tailscale ready; opening Remote Desktop…"}
-	bridge, err := startSOCKSBridge(ctx, connected.ProxyURL, rdpAddress(config.target), func(err error) { events <- sessionEvent{log: "RDP bridge: " + err.Error()} })
+	proxyArg, err := rdpProxyArgument(connected.ProxyURL)
 	if err != nil {
 		finalErr = err
 		return
 	}
-	defer bridge.Close()
+	events <- sessionEvent{stage: "Preparing Remote Desktop", status: "Tailscale ready; opening Remote Desktop…"}
 	rdpCtx, stopRDP := context.WithCancel(ctx)
 	defer stopRDP()
 	rdp := exec.CommandContext(rdpCtx, freeRDPPath, "/args-from:stdin")
 	rdp.Dir = filepath.Dir(freeRDPPath)
-	rdp.Stdin = strings.NewReader(strings.Join(buildRDPArgs(config, bridge.Address()), "\n") + "\n")
+	rdp.Stdin = strings.NewReader(strings.Join(buildRDPArgs(config, rdpAddress(config.target), proxyArg), "\n") + "\n")
 	logs := newDiagnosticWriter("FreeRDP", config.password, events)
 	rdp.Stdout = logs
 	rdp.Stderr = logs
@@ -688,7 +685,7 @@ func waitForProxy(ctx context.Context, stdout io.Reader, emit func(string)) (pro
 	return proxyEvent{}, errors.New("portable Tailscale stopped before connecting")
 }
 
-func buildRDPArgs(config sessionConfig, endpoint string) []string {
+func buildRDPArgs(config sessionConfig, endpoint, proxyArg string) []string {
 	args := []string{
 		"/v:" + endpoint,
 		"/server-name:" + serverName(config.target),
@@ -714,7 +711,27 @@ func buildRDPArgs(config sessionConfig, endpoint string) []string {
 	if config.fullscreen {
 		args = append(args, "/f")
 	}
+	// FreeRDP authenticates to the tsnet SOCKS5 proxy itself, so no
+	// unauthenticated local relay is exposed to other local processes.
+	args = append(args, "/proxy:"+proxyArg)
 	return args
+}
+
+// rdpProxyArgument validates the tsnet proxy URL and returns it in the form
+// FreeRDP's /proxy option expects.
+func rdpProxyArgument(proxyURL string) (string, error) {
+	u, err := url.Parse(proxyURL)
+	if err != nil {
+		return "", fmt.Errorf("parse SOCKS URL: %w", err)
+	}
+	password, hasPassword := "", false
+	if u.User != nil {
+		password, hasPassword = u.User.Password()
+	}
+	if u.Scheme != "socks5" || u.Host == "" || u.User == nil || !hasPassword || password == "" {
+		return "", fmt.Errorf("unsupported SOCKS URL %q", proxyURL)
+	}
+	return u.String(), nil
 }
 
 func serverName(target string) string {
@@ -729,89 +746,6 @@ func rdpAddress(target string) string {
 		return target
 	}
 	return net.JoinHostPort(strings.Trim(target, "[]"), "3389")
-}
-
-type socksBridge struct {
-	listener net.Listener
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
-	report   func(error)
-}
-
-func startSOCKSBridge(parent context.Context, proxyURL, target string, report func(error)) (*socksBridge, error) {
-	u, err := url.Parse(proxyURL)
-	if err != nil {
-		return nil, fmt.Errorf("parse SOCKS URL: %w", err)
-	}
-	if u.Scheme != "socks5" || u.Host == "" {
-		return nil, fmt.Errorf("unsupported SOCKS URL %q", proxyURL)
-	}
-
-	var auth *xproxy.Auth
-	if u.User != nil {
-		password, _ := u.User.Password()
-		auth = &xproxy.Auth{User: u.User.Username(), Password: password}
-	}
-	dialer, err := xproxy.SOCKS5("tcp", u.Host, auth, &net.Dialer{Timeout: 10 * time.Second})
-	if err != nil {
-		return nil, fmt.Errorf("configure SOCKS5: %w", err)
-	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return nil, fmt.Errorf("listen on loopback: %w", err)
-	}
-
-	ctx, cancel := context.WithCancel(parent)
-	b := &socksBridge{listener: listener, cancel: cancel, report: report}
-	b.wg.Add(1)
-	go func() {
-		defer b.wg.Done()
-		<-ctx.Done()
-		_ = listener.Close()
-	}()
-	b.wg.Add(1)
-	go func() {
-		defer b.wg.Done()
-		for {
-			local, err := listener.Accept()
-			if err != nil {
-				return
-			}
-			b.wg.Add(1)
-			go b.forward(ctx, dialer, local, target)
-		}
-	}()
-	return b, nil
-}
-
-func (b *socksBridge) Address() string { return b.listener.Addr().String() }
-
-func (b *socksBridge) Close() {
-	b.cancel()
-	_ = b.listener.Close()
-	b.wg.Wait()
-}
-
-func (b *socksBridge) forward(ctx context.Context, dialer xproxy.Dialer, local net.Conn, target string) {
-	defer b.wg.Done()
-	remote, err := dialer.(xproxy.ContextDialer).DialContext(ctx, "tcp", target)
-	if err != nil {
-		if b.report != nil && ctx.Err() == nil {
-			b.report(err)
-		}
-		_ = local.Close()
-		return
-	}
-	defer local.Close()
-	defer remote.Close()
-
-	done := make(chan struct{}, 2)
-	go func() { _, _ = io.Copy(remote, local); done <- struct{}{} }()
-	go func() { _, _ = io.Copy(local, remote); done <- struct{}{} }()
-	select {
-	case <-ctx.Done():
-	case <-done:
-	}
 }
 
 func executableDirectory() (string, error) {

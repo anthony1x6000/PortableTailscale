@@ -5,12 +5,10 @@ package main
 import (
 	"context"
 	"errors"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
@@ -192,46 +190,5 @@ func TestDiagnosticsExport(t *testing.T) {
 	data, err := os.ReadFile(paths[0])
 	if err != nil || strings.Contains(string(data), "test-secret") || strings.Contains(string(data), "private") {
 		t.Fatal("export contains secret")
-	}
-}
-
-func TestBridgeCancellationDuringSOCKSHandshake(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-	accepted := make(chan net.Conn, 1)
-	go func() {
-		c, e := listener.Accept()
-		if e == nil {
-			accepted <- c
-		}
-	}()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	bridge, err := startSOCKSBridge(ctx, "socks5://"+listener.Addr().String(), "example:3389", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer bridge.Close()
-	local, err := net.Dial("tcp", bridge.Address())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer local.Close()
-	select {
-	case c := <-accepted:
-		defer c.Close()
-	case <-time.After(3 * time.Second):
-		t.Fatal("SOCKS connection did not start")
-	}
-	cancel()
-	done := make(chan struct{})
-	go func() { bridge.Close(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("disconnect blocked on SOCKS handshake")
 	}
 }
