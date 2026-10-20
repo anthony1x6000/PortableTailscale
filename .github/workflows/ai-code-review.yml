@@ -23,6 +23,7 @@ on:
     types: [opened, synchronize, reopened]
     branches:
       - main
+      - review-base
 
 concurrency:
   # Per pr, so a new push cancels the review of the commit it replaced.
