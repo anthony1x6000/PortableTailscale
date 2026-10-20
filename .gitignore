@@ -25,6 +25,9 @@ coverage.*
 go.work
 go.work.sum
 
+# Browser test dependencies (CI-only)
+node_modules/
+
 # Portable Tailscale identity and cached tailnet data
 /data/
 *.state
