@@ -76,3 +76,20 @@ func TestDirRejectsReparsePoint(t *testing.T) {
 		t.Fatal("followed a reparse point while applying the ACL")
 	}
 }
+
+func TestDirRejectsHardLink(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "outside")
+	if err := os.WriteFile(target, []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(t.TempDir(), "data")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(target, filepath.Join(dir, "planted")); err != nil {
+		t.Skipf("cannot create a test hard link: %v", err)
+	}
+	if err := Dir(dir); err == nil {
+		t.Fatal("protected a hard link, changing the ACL outside the tree")
+	}
+}

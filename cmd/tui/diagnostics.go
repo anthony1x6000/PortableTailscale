@@ -43,9 +43,11 @@ func isDiagnosticNoise(s string) bool {
 
 func redact(s string, secrets ...string) string {
 	// Longest first: a short secret that is a substring of a longer one must
-	// not leave the remainder of the longer value in place.
-	sort.SliceStable(secrets, func(i, j int) bool { return len(secrets[i]) > len(secrets[j]) })
-	for _, secret := range secrets {
+	// not leave the remainder of the longer value in place. Sort a copy so the
+	// caller's slice is untouched.
+	ordered := append([]string(nil), secrets...)
+	sort.SliceStable(ordered, func(i, j int) bool { return len(ordered[i]) > len(ordered[j]) })
+	for _, secret := range ordered {
 		if secret != "" {
 			s = strings.ReplaceAll(s, secret, "[redacted]")
 		}
