@@ -1,0 +1,41 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.x"
+          cache: true
+      - run: go vet .
+      - run: go test -race .
+        env:
+          REQUIRE_NODE: "1"
+      - run: go test -run=^$ -fuzz=FuzzSplitTarget -fuzztime=5s .
+      - run: go test -run=^$ -fuzz=FuzzApplySSHBlock -fuzztime=5s .
+
+  browser-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.x"
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm install --no-package-lock --no-audit --no-fund
+      - run: sudo apt-get update && sudo apt-get install -y xvfb
+      - run: npx playwright install --with-deps chromium
+      - run: BROWSER_TEST=1 REQUIRE_NODE=1 xvfb-run -a go test -run TestChromiumBrowser -v .

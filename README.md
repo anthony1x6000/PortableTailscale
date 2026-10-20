@@ -1,33 +1,142 @@
 # PortableTailscale
 
-PortableTailscale runs a Tailscale node in userspace and provides an
-authenticated SOCKS5 proxy on localhost. It is a single Windows executable and
-runs as a regular user.
+PortableTailscale runs an **ephemeral** Tailscale node in userspace and gives a
+Windows desktop automatic access to tailnet machines by name. It is a single
+executable and runs as a regular user, without a TUN driver or administrator
+rights.
 
-The Tailscale identity is stored beside the executable, so the same folder can
-be carried between Windows computers or kept on a removable drive.
+It provides three things:
+
+- a loopback SOCKS5 proxy (`socks5://tsnet:PASSWORD@127.0.0.1:PORT`),
+- a loopback HTTP proxy plus PAC file so Chromium browsers (Chrome, Edge) can
+  open `http://magicdns-name:8080/` directly,
+- a managed SSH `ProxyCommand` so `ssh magicdns-name` works without extra tools.
+
+Every run is a fresh, ephemeral Tailscale node. You sign in again each time and
+no device identity is written to disk. Closing the program removes the
+credentials and every tunnel.
 
 ## Quick start
 
-1. Run `PortableTailscale.exe`.
-2. Complete the Tailscale sign-in in your browser on first use.
-3. Copy the SOCKS5 proxy URL shown in the terminal.
-4. Keep PortableTailscale running while the proxy is in use.
+1. Run `PortableTailscale.exe --install` once. Complete the Tailscale sign-in
+   (GitHub, Google, Microsoft, or whatever your tailnet uses).
+2. Restart Chrome or Edge once so it reads the new proxy configuration.
+3. On later runs, just start `PortableTailscale.exe`, sign in, and use:
 
-The proxy URL has this format:
+   ```text
+   http://magicdns-name:8080/
+   ssh magicdns-name
+   ```
+
+4. Keep the window open. Closing it stops the proxies and SSH access.
+
+`--install` is a one-time setup; it also starts the proxy for that run. Use
+`--uninstall` to remove the browser and SSH configuration.
+
+## How automatic access works
+
+When `--install` has been used (or a previous install is detected), PortableTailscale starts an HTTP proxy on `127.0.0.1:41112` after sign-in and serves a PAC file listing the tailnet peers it can see.
+
+- **Browsers:** Chromium reads the per-user system proxy configuration. The PAC
+  sends only tailnet names and `*.ts.net` hosts to the local proxy and everything
+  else `DIRECT`. The proxy resolves the name through Tailscale and forwards the
+  TCP stream. HTTP and HTTPS traffic work.
+- **SSH:** `--install` prepends a marker-managed block to
+  `%USERPROFILE%\.ssh\config`. `ssh`, `scp`, and `sftp` then run
+  `PortableTailscale.exe --stdio %h %p`, which tunnels through the same local
+  proxy.
+- **SOCKS5:** the authenticated SOCKS5 URL is still printed for applications
+  that speak SOCKS5 directly.
+
+The browser backup is stored in `data/browser-proxy.json`. `--uninstall` restores
+the previous PAC setting and removes the SSH block.
+
+### Browser notes
+
+- Chrome and Edge use the system proxy by default; that is what `--install`
+  configures.
+- Restart the browser after the first `--install`. Chromium caches proxy
+  configuration.
+- Firefox only works if it is set to **Use system proxy settings**; the manual
+  proxy mode cannot use the PAC file.
+- Corporate proxy policies (`ProxySettings`, `ProxyMode`) can override the
+  per-user setting. PortableTailscale cannot bypass them.
+- The PAC URL changes its query string on every run to defeat browser caching.
+- If the program is not running, the PAC file cannot be fetched and browsers fall
+  back to a direct connection. Ordinary internet browsing keeps working;
+  tailnet names do not.
+
+### SSH notes
+
+- The managed block is prepended so its `ProxyCommand` wins over later blocks
+  (OpenSSH uses the first value it finds).
+- If you move the executable, run `--install` again so the path is refreshed.
+- Tailscale SSH on the remote host sees the **ephemeral node** as the client.
+  Because that node belongs to your Tailscale user, ACLs must allow your user or
+  `autogroup:member`, not a fixed device name or IP.
+- Ordinary SSH servers still use their normal keys or passwords.
+
+## Login and ephemeral identity
+
+- Every run creates a new Tailscale node with in-memory state. The sign-in URL
+  opens in your browser (use `--no-browser` to print it instead).
+- The node is registered as **ephemeral**; it disappears from the admin console
+  after it goes offline.
+- Nothing is persisted: no device key, no `tailscaled.state`, no session token.
+- Temporary files live under `%TEMP%\portable-tailscale-*` and are deleted on a
+  clean exit. Leftovers from a crash are removed at the next startup when they
+  are older than 24 hours.
+- If `TS_AUTHKEY` is set in the environment, tsnet uses it instead of an
+  interactive login. That is outside the supported flow and keeps a longer-lived
+  credential in your environment.
+
+Existing installations may still have `data/tailscaled.state` from an earlier
+version. It is no longer read. Delete it if you do not want the old identity on
+disk, and revoke that device in the Tailscale admin console.
+
+## Usage limits
+
+This is a proxy, not a system VPN. It deliberately does not install a TUN
+adapter, change system DNS, or require administrator rights.
+
+- **Covered:** Chromium browsers using the system proxy, SSH/SCP/SFTP through the
+  managed `ProxyCommand`, and any app you point at the loopback HTTP proxy, e.g.
+  `curl -x http://127.0.0.1:41112 http://magicdns-name:8080/`.
+- **Not covered:** arbitrary TCP/UDP sockets, `ping`, apps that ignore the system
+  proxy or their own proxy settings, and tools that resolve names locally before
+  connecting.
+- The program must be running. When automatic access is installed, it binds
+  `127.0.0.1:41112`; a second instance fails with a clear error.
+- The loopback HTTP proxy has no authentication. Any local process can use it
+  while the program runs. It only dials tailnet peers, IPs, and `*.ts.net` names,
+  so it cannot be used as an open internet proxy.
+- TCP only; UDP is not proxied.
+- MagicDNS must be enabled: both short peer names and `*.ts.net` names are
+  resolved through the tailnet resolver.
+- The target service must listen on the tailnet interface (not only
+  `127.0.0.1`), its firewall must allow the port, and tailnet ACLs must allow
+  your user.
+- Because every run is a new node, ACL rules that name the old device or its IP
+  stop matching. Use user or group rules.
+
+## SOCKS5 proxy
+
+The authenticated SOCKS5 URL has this format:
 
 ```text
 socks5://tsnet:PASSWORD@127.0.0.1:PORT
 ```
 
-Use it with any application that supports an authenticated SOCKS5 proxy. A new
-localhost port and password are generated each time PortableTailscale starts.
+A new port and password are generated each run. Use it with any application
+that supports an authenticated SOCKS5 proxy. Browsers cannot send SOCKS5
+credentials, which is why the PAC/HTTP proxy exists.
 
 ## RDP example
 
 `PortableTailscaleRDP.exe` is an example client included with the project. It
 starts PortableTailscale and opens the bundled FreeRDP client through the
-authenticated SOCKS5 proxy.
+authenticated SOCKS5 proxy. Since each launch starts an ephemeral node, expect
+a Tailscale sign-in each time as well.
 
 1. Place `PortableTailscaleRDP.exe` beside `PortableTailscale.exe`.
 2. Put `sdl-freerdp.exe` in the `freerdp` folder. Download the official
@@ -84,11 +193,12 @@ FreeRDP and its PortableTailscale process. If Tailscale fails to start or stops
 unexpectedly, the next Connect attempt retries it.
 
 Saved profiles contain the computer, username, domain, and every Display,
-Sharing, and Advanced setting in `data/rdp-profiles.json` beside the launcher. Passwords are never
-saved; loading a profile clears the password field. Ctrl+S asks for a profile name,
-suggesting the computer name if you leave it blank. Saving an existing profile
-name updates it; saving another name creates a separate profile. In the profile
-browser, `/` searches, Enter loads, and Backspace opens a deletion confirmation.
+Sharing, and Advanced setting in `data/rdp-profiles.json` beside the launcher.
+Passwords are never saved; loading a profile clears the password field. Ctrl+S
+asks for a profile name, suggesting the computer name if you leave it blank.
+Saving an existing profile name updates it; saving another name creates a
+separate profile. In the profile browser, `/` searches, Enter loads, and
+Backspace opens a deletion confirmation.
 
 Diagnostics retain the latest 250 events in memory. Open them with Ctrl+L and
 scroll with arrows or Page Up/Page Down. Ctrl+E exports the redacted events to a
@@ -105,31 +215,24 @@ to light and dark terminal backgrounds.
 Press `Ctrl+Alt+Enter` to leave a fullscreen FreeRDP session. `Alt+Tab` returns
 to the launcher, where Esc disconnects the session.
 
-## Build
+## Build and releases
 
-Requirements:
+Builds and tests run in GitHub Actions (`.github/workflows/ci.yml`). Every push
+and pull request runs:
 
-- Windows x64
-- Go 1.26 or newer
+- `go vet` and `go test` on Windows (including the registry and RDP tests),
+- `go test -race` and short fuzz runs on Linux,
+- a real Chromium end-to-end test through the generated PAC file using
+  Playwright under Xvfb.
 
-Build PortableTailscale:
+Download the built executables from the **Actions** run artifacts. Tagging a
+commit with `v*` publishes both executables as a GitHub Release.
+
+The workflow builds with:
 
 ```powershell
 go build -tags=ts_omit_logtail -trimpath -ldflags="-s -w" -o PortableTailscale.exe .
-```
-
-Build the optional RDP example:
-
-```powershell
 go build -trimpath -ldflags="-s -w" -o PortableTailscaleRDP.exe .\cmd\tui
-```
-
-Run launcher checks on Windows:
-
-```powershell
-go test ./cmd/tui
-go vet ./cmd/tui
-.\PortableTailscaleRDP.exe --smoke-test
 ```
 
 The RDP example also needs a Windows x64 build of `sdl-freerdp.exe`, available
@@ -142,24 +245,28 @@ from the
 ```text
 PortableTailscale.exe
 data/
-  tailscaled.state
+  browser-proxy.json        # only after --install; prior PAC backup
 
 # Optional RDP example
 PortableTailscaleRDP.exe
 freerdp/
   sdl-freerdp.exe
+data/
+  rdp-profiles.json
+  rdp-diagnostics-*.log
 ```
 
-The `data` folder is created automatically and contains the Tailscale device
-identity. Keep it private. On NTFS, the folder and its files are restricted to
-the current Windows user, SYSTEM and Administrators; removable FAT/exFAT media
-has no ACLs, so there the folder is only as private as the drive. If it is lost
-or copied, revoke the device from the Tailscale admin console.
+The `data` folder holds the browser PAC backup and RDP profiles/diagnostics; no
+Tailscale identity is stored. Delete any old `data/tailscaled.state` left by a
+previous version. On NTFS, the folder and its files are restricted to the
+current Windows user, SYSTEM and Administrators; removable FAT/exFAT media has
+no ACLs, so there the folder is only as private as the drive.
 
 ## Options
 
 ```text
---state-dir PATH  Store the Tailscale identity in PATH
+--install         Install the browser PAC and SSH config, then run
+--uninstall       Remove the browser PAC and SSH config, then exit
 --hostname NAME   Tailnet device name (default: portable-tailscale)
 --json            Write newline-delimited status events
 --no-browser      Print the sign-in URL without opening a browser
@@ -171,9 +278,10 @@ PortableTailscale is built on the following open-source projects:
 
 | Project | Used for | License |
 | --- | --- | --- |
-| [Tailscale `tsnet`](https://pkg.go.dev/tailscale.com/tsnet) ([source](https://github.com/tailscale/tailscale/tree/main/tsnet)) | Userspace Tailscale node and tailnet networking (`tailscale.com` v1.102.5) | BSD 3-Clause, see [licenses/LICENSE.Tailscale.txt](licenses/LICENSE.Tailscale.txt) |
+| [Tailscale `tsnet`](https://pkg.go.dev/tailscale.com/tsnet) ([source](https://github.com/tailscale/tailscale/tree/main/tsnet)) | Userspace Tailscale node, MagicDNS dialing, and tailnet networking (`tailscale.com` v1.102.5) | BSD 3-Clause, see [licenses/LICENSE.Tailscale.txt](licenses/LICENSE.Tailscale.txt) |
 | [Bubble Tea](https://github.com/charmbracelet/bubbletea), [Bubbles](https://github.com/charmbracelet/bubbles), and [Lip Gloss](https://github.com/charmbracelet/lipgloss) by Charm | Terminal UI of the RDP example | MIT, see [licenses/LICENSE.Charmbracelet.txt](licenses/LICENSE.Charmbracelet.txt) |
 | [FreeRDP](https://github.com/FreeRDP/FreeRDP) `sdl-freerdp.exe` | RDP client started by the RDP example ([nightly build](https://ci.freerdp.com/job/freerdp-nightly-windows/)) | Apache 2.0, see [freerdp/LICENSE.FreeRDP.txt](freerdp/LICENSE.FreeRDP.txt) and [FREERDP.md](FREERDP.md) |
+| [Playwright](https://playwright.dev/) | Chromium end-to-end test in CI | Apache 2.0 |
 
 Tailscale is a trademark of Tailscale Inc. This project is not affiliated with
 or endorsed by Tailscale Inc., Charmbracelet, Inc., or the FreeRDP project.

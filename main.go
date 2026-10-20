@@ -1,5 +1,5 @@
-// PortableTailscale exposes an embedded Tailscale node as an authenticated
-// SOCKS5 proxy on the Windows loopback interface.
+// PortableTailscale exposes an embedded, ephemeral Tailscale node as a
+// loopback SOCKS5 proxy plus an automatic browser/SSH path to the tailnet.
 package main
 
 import (
@@ -8,6 +8,8 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -18,10 +20,11 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"portabletailscale/internal/private"
 
-	"tailscale.com/ipn/store"
+	"tailscale.com/ipn/store/mem"
 	"tailscale.com/tsnet"
 	"tailscale.com/types/logger"
 )
@@ -29,10 +32,12 @@ import (
 var authURLPattern = regexp.MustCompile(`https://login\.tailscale\.com/a/[A-Za-z0-9_-]+`)
 
 type options struct {
-	stateDir  string
 	hostname  string
 	json      bool
 	noBrowser bool
+	install   bool
+	uninstall bool
+	stdio     bool
 }
 
 type event struct {
@@ -44,7 +49,8 @@ type event struct {
 	Username    string `json:"username,omitempty"`
 	Password    string `json:"password,omitempty"`
 	TailscaleIP string `json:"tailscaleIp,omitempty"`
-	StateDir    string `json:"stateDirectory,omitempty"`
+	HTTPProxy   string `json:"httpProxy,omitempty"`
+	PACURL      string `json:"pacUrl,omitempty"`
 }
 
 type reporter struct {
@@ -66,7 +72,7 @@ func (r *reporter) emit(e event) {
 	case "starting":
 		fmt.Println(header(r.color))
 		fmt.Println()
-		fmt.Printf("Starting Tailscale (state: %s)\n", e.StateDir)
+		fmt.Println("Starting Portable Tailscale (ephemeral session)")
 	case "auth":
 		fmt.Printf("Authenticate this device:\n%s\n", e.AuthURL)
 	case "connected":
@@ -75,7 +81,13 @@ func (r *reporter) emit(e event) {
 		fmt.Printf("Username:       %s\n", e.Username)
 		fmt.Printf("Password:       %s\n", e.Password)
 		fmt.Printf("Proxy URL:      %s\n", e.ProxyURL)
-		fmt.Println("\nKeep this window open while using the proxy. Press Ctrl+C to stop.")
+		if e.HTTPProxy != "" {
+			fmt.Printf("HTTP proxy:     %s\n", e.HTTPProxy)
+			fmt.Printf("PAC file:       %s\n", e.PACURL)
+		}
+		fmt.Println("\nKeep this window open while the proxy is in use. Press Ctrl+C to stop.")
+	case "message":
+		fmt.Println(e.Message)
 	case "stopping":
 		fmt.Println("\nStopping proxy...")
 	case "error":
@@ -103,37 +115,43 @@ func header(color bool) string {
 }
 
 func main() {
-	os.Exit(run())
-}
-
-func run() int {
 	opts, err := parseOptions()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		return 2
+		os.Exit(2)
 	}
+	switch {
+	case opts.uninstall:
+		os.Exit(uninstall())
+	case opts.stdio:
+		os.Exit(runStdio(flag.Args()))
+	default:
+		os.Exit(run(opts))
+	}
+}
+
+func run(opts options) int {
 	report := &reporter{json: opts.json, color: !opts.json && enableColor()}
-	if err := os.MkdirAll(opts.stateDir, 0700); err != nil {
-		report.emit(event{Event: "error", Message: fmt.Sprintf("create state directory: %v", err)})
-		return 1
-	}
-	// Best effort: FAT/exFAT has no ACLs, so the folder is only as private as
-	// the medium; NTFS gets owner-only access instead of the inherited folder ACL.
-	if err := private.Dir(opts.stateDir); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: cannot restrict state directory permissions: %v\n", err)
-	}
-	report.emit(event{Event: "starting", StateDir: opts.stateDir})
-	stateStore, err := store.NewFileStore(logger.Discard, filepath.Join(opts.stateDir, "tailscaled.state"))
-	if err != nil {
-		report.emit(event{Event: "error", Message: fmt.Sprintf("open Tailscale identity: %v", err)})
-		return 1
-	}
-	runtimeDir, err := os.MkdirTemp("", "portable-tailscale-")
+	report.emit(event{Event: "starting"})
+
+	cleanupStaleRuntimeDirs(os.TempDir(), runtimeDirMaxAge, time.Now())
+	runtimeDir, err := os.MkdirTemp("", runtimeDirPrefix)
 	if err != nil {
 		report.emit(event{Event: "error", Message: fmt.Sprintf("create temporary runtime directory: %v", err)})
 		return 1
 	}
 	defer os.RemoveAll(runtimeDir)
+	// The temp directory holds tsnet logs and ephemeral state; keep it private
+	// on NTFS. FAT/exFAT has no ACLs, so this is best effort.
+	if err := private.Dir(runtimeDir); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: cannot restrict runtime directory permissions: %v\n", err)
+	}
+
+	stateStore, err := mem.New(logger.Discard, "")
+	if err != nil {
+		report.emit(event{Event: "error", Message: fmt.Sprintf("create in-memory state store: %v", err)})
+		return 1
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -157,11 +175,46 @@ func run() int {
 	}
 
 	srv := &tsnet.Server{
-		Dir:      runtimeDir,
-		Store:    stateStore,
-		Hostname: opts.hostname,
-		UserLogf: userLogf,
-		Logf:     logger.Discard,
+		Dir:       runtimeDir,
+		Store:     stateStore,
+		Hostname:  opts.hostname,
+		Ephemeral: true,
+		UserLogf:  userLogf,
+		Logf:      logger.Discard,
+	}
+
+	dataDir, dataErr := executableDataDir()
+	sshPath, sshErr := sshConfigPath()
+	needHTTPProxy := opts.install ||
+		(dataErr == nil && browserConfigured(dataDir)) ||
+		(sshErr == nil && hasSSHBlock(sshPath))
+
+	var proxy *localProxy
+	var proxyListener net.Listener
+	var httpServer *http.Server
+	if needHTTPProxy {
+		// Bind before login so a busy port fails fast instead of after an
+		// interactive sign-in.
+		proxyListener, err = net.Listen("tcp", localProxyAddr)
+		if err != nil {
+			report.emit(event{Event: "error", Message: fmt.Sprintf("start local proxy on %s: %v (is another instance running?)", localProxyAddr, err)})
+			return 1
+		}
+		proxy = newLocalProxy(srv)
+		httpServer = &http.Server{
+			Handler:           proxy,
+			ReadHeaderTimeout: 15 * time.Second,
+		}
+		go func() { _ = httpServer.Serve(proxyListener) }()
+		defer func() {
+			_ = httpServer.Close()
+			_ = proxyListener.Close()
+		}()
+	}
+
+	if err := srv.Start(); err != nil {
+		report.emit(event{Event: "error", Message: fmt.Sprintf("start Tailscale: %v", err)})
+		return 1
 	}
 	defer srv.Close()
 
@@ -195,52 +248,142 @@ func run() int {
 		tailscaleIP = ip6.String()
 	}
 
-	report.emit(event{
+	pacURL := pacURLFor(time.Now())
+	peers := peerList{}
+	if proxy != nil {
+		proxy.cache.reset()
+		peers = proxy.peers(ctx)
+	}
+	exePath, exeErr := os.Executable()
+	if exeErr == nil {
+		if resolved, err := filepath.EvalSymlinks(exePath); err == nil {
+			exePath = resolved
+		}
+	}
+
+	if opts.install {
+		installBrowser(report, dataDir, dataErr, pacURL)
+		installSSH(report, sshPath, sshErr, exePath, exeErr, peers)
+	} else {
+		refreshInstalled(report, dataDir, pacURL, sshPath, exePath, peers)
+	}
+
+	connected := event{
 		Event:       "connected",
 		ProxyURL:    proxyURL,
 		ProxyAddr:   addr,
 		Username:    "tsnet",
 		Password:    proxyPassword,
 		TailscaleIP: tailscaleIP,
-		StateDir:    opts.stateDir,
-	})
+	}
+	if needHTTPProxy {
+		connected.HTTPProxy = "http://" + localProxyAddr
+		connected.PACURL = pacURL
+	}
+	report.emit(connected)
 
 	<-ctx.Done()
 	report.emit(event{Event: "stopping"})
 	return 0
 }
 
-func parseOptions() (options, error) {
-	defaultStateDir, err := portableStateDir()
+func installBrowser(report *reporter, dataDir string, dataErr error, pacURL string) {
+	if dataErr != nil {
+		report.emit(event{Event: "message", Message: "Browser setup skipped: " + dataErr.Error()})
+		return
+	}
+	if err := installBrowserPAC(dataDir, pacURL); err != nil {
+		report.emit(event{Event: "message", Message: "Browser setup failed: " + err.Error()})
+		return
+	}
+	report.emit(event{Event: "message", Message: "Browser proxy configured. Restart Chrome or Edge once so it reads the PAC file."})
+}
+
+func installSSH(report *reporter, sshPath string, sshErr error, exePath string, exeErr error, peers peerList) {
+	if sshErr != nil {
+		report.emit(event{Event: "message", Message: "SSH setup skipped: " + sshErr.Error()})
+		return
+	}
+	if exeErr != nil {
+		report.emit(event{Event: "message", Message: "SSH setup skipped: " + exeErr.Error()})
+		return
+	}
+	if err := installSSHConfig(sshPath, exePath, peers); err != nil {
+		report.emit(event{Event: "message", Message: "SSH setup failed: " + err.Error()})
+		return
+	}
+	report.emit(event{Event: "message", Message: "SSH configured for " + sshHostList(peers)})
+}
+
+func refreshInstalled(report *reporter, dataDir, pacURL, sshPath, exePath string, peers peerList) {
+	if dataDir != "" && browserConfigured(dataDir) {
+		if err := refreshBrowserPAC(dataDir, pacURL); err != nil {
+			report.emit(event{Event: "message", Message: "Browser refresh failed: " + err.Error()})
+		}
+	}
+	if sshPath != "" && exePath != "" && hasSSHBlock(sshPath) {
+		if err := upsertSSHConfig(sshPath, renderSSHBlock(exePath, peers)); err != nil {
+			report.emit(event{Event: "message", Message: "SSH refresh failed: " + err.Error()})
+		}
+	}
+}
+
+func uninstall() int {
+	code := 0
+	dataDir, err := executableDataDir()
 	if err != nil {
-		return options{}, err
+		fmt.Fprintln(os.Stderr, "PortableTailscale:", err)
+		code = 1
+	} else if err := uninstallBrowserPAC(dataDir); err != nil {
+		fmt.Fprintln(os.Stderr, "PortableTailscale: browser:", err)
+		code = 1
 	}
 
+	path, err := sshConfigPath()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "PortableTailscale:", err)
+		code = 1
+	} else if err := removeSSHConfig(path); err != nil {
+		fmt.Fprintln(os.Stderr, "PortableTailscale: ssh:", err)
+		code = 1
+	}
+	return code
+}
+
+func parseOptions() (options, error) {
 	var opts options
-	flag.StringVar(&opts.stateDir, "state-dir", defaultStateDir, "directory for the persistent Tailscale identity")
 	flag.StringVar(&opts.hostname, "hostname", "portable-tailscale", "device name shown in the Tailscale admin console")
 	flag.BoolVar(&opts.json, "json", false, "write newline-delimited JSON events")
 	flag.BoolVar(&opts.noBrowser, "no-browser", false, "print the authentication URL without opening it")
+	flag.BoolVar(&opts.install, "install", false, "install the browser PAC and SSH config, then run")
+	flag.BoolVar(&opts.uninstall, "uninstall", false, "remove the browser PAC and SSH config, then exit")
+	flag.BoolVar(&opts.stdio, "stdio", false, "internal: tunnel stdin/stdout to HOST PORT")
 	flag.Parse()
 
-	absStateDir, err := filepath.Abs(opts.stateDir)
-	if err != nil {
-		return options{}, fmt.Errorf("resolve state directory: %w", err)
+	if opts.install && opts.uninstall {
+		return options{}, errors.New("--install and --uninstall are mutually exclusive")
 	}
-	opts.stateDir = absStateDir
 	return opts, nil
 }
 
-func portableStateDir() (string, error) {
-	executable, err := os.Executable()
+func executableDirectory() (string, error) {
+	path, err := os.Executable()
 	if err != nil {
 		return "", fmt.Errorf("find executable directory: %w", err)
 	}
-	executable, err = filepath.EvalSymlinks(executable)
+	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return "", fmt.Errorf("resolve executable path: %w", err)
 	}
-	return filepath.Join(filepath.Dir(executable), "data"), nil
+	return filepath.Dir(resolved), nil
+}
+
+func executableDataDir() (string, error) {
+	dir, err := executableDirectory()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "data"), nil
 }
 
 func openBrowser(address string) error {
