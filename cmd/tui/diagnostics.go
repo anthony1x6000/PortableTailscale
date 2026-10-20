@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 
@@ -41,7 +42,12 @@ func isDiagnosticNoise(s string) bool {
 }
 
 func redact(s string, secrets ...string) string {
-	for _, secret := range secrets {
+	// Longest first: a short secret that is a substring of a longer one must
+	// not leave the remainder of the longer value in place. Sort a copy so the
+	// caller's slice is untouched.
+	ordered := append([]string(nil), secrets...)
+	sort.SliceStable(ordered, func(i, j int) bool { return len(ordered[i]) > len(ordered[j]) })
+	for _, secret := range ordered {
 		if secret != "" {
 			s = strings.ReplaceAll(s, secret, "[redacted]")
 		}
@@ -57,16 +63,30 @@ func redact(s string, secrets ...string) string {
 }
 
 type diagnosticWriter struct {
-	mu               sync.Mutex
-	pending          string
-	source, password string
-	events           chan<- sessionEvent
-	dropping         bool
-	failure          error
+	mu       sync.Mutex
+	pending  string
+	source   string
+	secrets  []string
+	events   chan<- sessionEvent
+	dropping bool
+	failure  error
 }
 
-func newDiagnosticWriter(source, password string, events chan<- sessionEvent) *diagnosticWriter {
-	return &diagnosticWriter{source: source, password: password, events: events}
+func newDiagnosticWriter(source, secret string, events chan<- sessionEvent) *diagnosticWriter {
+	w := &diagnosticWriter{source: source, events: events}
+	w.AddSecret(secret)
+	return w
+}
+
+// AddSecret adds a value to redact from every subsequent line, such as the
+// generated tsnet proxy password carried in the FreeRDP /proxy argument.
+func (w *diagnosticWriter) AddSecret(secret string) {
+	if secret == "" {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.secrets = append(w.secrets, secret)
 }
 func (w *diagnosticWriter) emit(s string) {
 	if isDiagnosticNoise(s) {
@@ -82,7 +102,7 @@ func (w *diagnosticWriter) emit(s string) {
 	}
 	// Diagnostics must never block child-process shutdown.
 	select {
-	case w.events <- sessionEvent{log: w.source + ": " + redact(s, w.password)}:
+	case w.events <- sessionEvent{log: w.source + ": " + redact(s, w.secrets...)}:
 	default:
 	}
 }
@@ -110,6 +130,7 @@ func (w *diagnosticWriter) Write(p []byte) (int, error) {
 	}
 	return len(p), nil
 }
+
 // Failure returns the first recognised connection error FreeRDP reported.
 func (w *diagnosticWriter) Failure() error {
 	w.mu.Lock()

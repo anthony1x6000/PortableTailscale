@@ -142,6 +142,7 @@ func (m *model) addLog(s string) {
 		m.diagnostics.GotoBottom()
 	}
 }
+
 // diagnosticsContent wraps each event to the viewport width, indenting
 // continuation lines under the message so long FreeRDP lines stay readable.
 func (m model) diagnosticsContent() string {

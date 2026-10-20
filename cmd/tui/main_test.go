@@ -114,3 +114,18 @@ func TestRDPProxyArgument(t *testing.T) {
 		}
 	}
 }
+
+func TestRDPProxyArgumentErrorOmitsSecret(t *testing.T) {
+	for _, input := range []string{
+		"http://tsnet:top-secret@127.0.0.1:1",
+		"socks5://tsnet:top-secret@[::1",
+	} {
+		_, err := rdpProxyArgument(input)
+		if err == nil {
+			t.Fatalf("accepted bad proxy URL %q", input)
+		}
+		if strings.Contains(err.Error(), "top-secret") {
+			t.Fatalf("error leaks the proxy password: %v", err)
+		}
+	}
+}

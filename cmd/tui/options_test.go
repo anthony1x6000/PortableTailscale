@@ -3,6 +3,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -201,15 +203,39 @@ func TestDiagnosticsWrapWithIndent(t *testing.T) {
 }
 
 func TestSharedFolderCannotOverlapInstallDirectory(t *testing.T) {
-	base := `C:\Tools\PortableTailscale`
-	for _, folder := range []string{base, `C:\Tools\PortableTailscale\data`, `C:\Tools\PortableTailscale\freerdp`, `C:\Tools`, `c:\tools\portabletailscale`} {
+	parent := t.TempDir()
+	base := filepath.Join(parent, "PortableTailscale")
+	data := filepath.Join(base, "data")
+	freerdp := filepath.Join(base, "freerdp")
+	for _, dir := range []string{data, freerdp} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	transfer := filepath.Join(parent, "transfer")
+	nearby := filepath.Join(parent, "PortableTailscale2")
+	for _, dir := range []string{transfer, nearby} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root := filepath.VolumeName(base) + string(filepath.Separator)
+	for _, folder := range []string{base, data, freerdp, parent, strings.ToUpper(base), root} {
 		if err := checkSharedFolder(folder, base); err == nil {
 			t.Errorf("accepted shared folder %q overlapping %q", folder, base)
 		}
 	}
-	for _, folder := range []string{`C:\Tools\Other`, `C:\Tools\PortableTailscale2`, `D:\Share`} {
+	for _, folder := range []string{transfer, nearby} {
 		if err := checkSharedFolder(folder, base); err != nil {
 			t.Errorf("rejected unrelated shared folder %q: %v", folder, err)
+		}
+	}
+	// A relative spelling must not slip past the absolute comparison.
+	if cwd, err := os.Getwd(); err == nil {
+		if rel, err := filepath.Rel(cwd, base); err == nil {
+			if err := checkSharedFolder(rel, base); err == nil {
+				t.Errorf("accepted relative path %q into the launcher tree", rel)
+			}
 		}
 	}
 }
@@ -223,5 +249,13 @@ func TestValidateRejectsSharingOwnExecutableDirectory(t *testing.T) {
 	o.Folder = base
 	if err := validateRDPOptions(o); err == nil {
 		t.Fatal("accepted the launcher directory as a shared folder")
+	}
+}
+
+func TestValidateRejectsRelativeSharedFolder(t *testing.T) {
+	o := defaultRDPOptions()
+	o.Folder = "data"
+	if err := validateRDPOptions(o); err == nil {
+		t.Fatal("accepted a relative shared folder")
 	}
 }
