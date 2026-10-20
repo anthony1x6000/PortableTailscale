@@ -20,14 +20,14 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
-      # cmd/tui is Windows-only, so this job covers the root package; the
+      # cmd/tui is Windows-only, so this job covers the main binary; the
       # Windows workflow runs ./... for everything.
-      - run: go vet .
-      - run: go test -race .
+      - run: go vet ./cmd/portabletailscale
+      - run: go test -race ./cmd/portabletailscale
         env:
           REQUIRE_NODE: "1"
-      - run: go test -run=^$ -fuzz=FuzzSplitTarget -fuzztime=5s .
-      - run: go test -run=^$ -fuzz=FuzzApplySSHBlock -fuzztime=5s .
+      - run: go test -run=^$ -fuzz=FuzzSplitTarget -fuzztime=5s ./cmd/portabletailscale
+      - run: go test -run=^$ -fuzz=FuzzApplySSHBlock -fuzztime=5s ./cmd/portabletailscale
 
   browser-e2e:
     runs-on: ubuntu-latest
@@ -46,4 +46,4 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y xvfb
       - run: npx playwright install --with-deps chromium
         working-directory: test
-      - run: BROWSER_TEST=1 REQUIRE_NODE=1 xvfb-run -a go test -run TestChromiumBrowser -v .
+      - run: BROWSER_TEST=1 REQUIRE_NODE=1 xvfb-run -a go test -run TestChromiumBrowser -v ./cmd/portabletailscale

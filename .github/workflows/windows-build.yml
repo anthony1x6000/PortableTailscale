@@ -37,7 +37,7 @@ jobs:
 
       - name: Build
         run: |
-          go build -tags=ts_omit_logtail -trimpath -ldflags="-s -w" -o PortableTailscale.exe .
+          go build -tags=ts_omit_logtail -trimpath -ldflags="-s -w" -o PortableTailscale.exe ./cmd/portabletailscale
           go build -trimpath -ldflags="-s -w" -o PortableTailscaleRDP.exe ./cmd/tui
 
       - name: Smoke test
