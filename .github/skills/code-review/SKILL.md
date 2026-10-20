@@ -53,7 +53,7 @@ Conduct multi-axis code review on PR diff across six review axes.
 
 ### 6. workflows and documentation
 - workflows (.github/workflows): verify least privilege permissions, secure triggers, no secret exposure on untrusted PRs, valid YAML syntax.
-- agent guides and markdown (.agents/, *.md): plain text only, no bold text, no emojis, factual accuracy, clear instructions.
+- agent guides and markdown (.github/, *.md): plain text only, no bold text, no emojis, factual accuracy, clear instructions.
 
 ## structural remedies
 

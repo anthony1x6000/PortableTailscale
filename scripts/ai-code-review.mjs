@@ -197,7 +197,7 @@ function readOptionalText(file) {
 
 function preparePayload() {
   const diffFile = process.env.DIFF_FILE || "/tmp/filtered_pr.diff";
-  const skillFile = process.env.SKILL_FILE || ".agents/skills/code-review/SKILL.md";
+  const skillFile = process.env.SKILL_FILE || ".github/skills/code-review/SKILL.md";
   const outputFile = process.env.PAYLOAD_FILE || "/tmp/ai_review_payload.json";
 
   if (!fs.existsSync(diffFile)) {
@@ -589,7 +589,7 @@ function postProviderComment(provider, context) {
     return abstain("the answer was cut off at the completion budget");
   }
 
-  // Strip bold text (**) and emojis per repo style guide (.agents/guides/style.md)
+  // Strip bold text (**) and emojis per the review format rules in .github/skills/code-review/SKILL.md.
   content = content.replace(/\*\*([^*]+)\*\*/g, "$1");
   content = content.replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu, "");
 
