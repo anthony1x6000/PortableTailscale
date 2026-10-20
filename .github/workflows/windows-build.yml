@@ -1,0 +1,42 @@
+name: Windows Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        run: |
+          go build -tags=ts_omit_logtail -trimpath -ldflags="-s -w" -o PortableTailscale.exe .
+          go build -trimpath -ldflags="-s -w" -o PortableTailscaleRDP.exe ./cmd/tui
+
+      - name: Test
+        run: go test ./cmd/tui
+
+      - name: Smoke test
+        run: .\PortableTailscaleRDP.exe --smoke-test
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: PortableTailscale-windows-amd64
+          path: |
+            PortableTailscale.exe
+            PortableTailscaleRDP.exe
+          if-no-files-found: error
