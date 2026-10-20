@@ -7,7 +7,8 @@
     "sessionHeader": true,
     "reasoningEffort": "high",
     "maxTokens": 262144,
-    "timeoutMs": 600000
+    "maxPromptBytes": 20000,
+    "timeoutMs": 300000
   },
   {
     "id": "opencode-go-deepseek",
@@ -17,6 +18,6 @@
     "sessionHeader": true,
     "reasoningEffort": "high",
     "maxTokens": 393216,
-    "timeoutMs": 600000
+    "timeoutMs": 480000
   }
 ]
