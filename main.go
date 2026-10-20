@@ -19,6 +19,8 @@ import (
 	"sync"
 	"syscall"
 
+	"portabletailscale/internal/private"
+
 	"tailscale.com/ipn/store"
 	"tailscale.com/tsnet"
 	"tailscale.com/types/logger"
@@ -114,6 +116,11 @@ func run() int {
 	if err := os.MkdirAll(opts.stateDir, 0700); err != nil {
 		report.emit(event{Event: "error", Message: fmt.Sprintf("create state directory: %v", err)})
 		return 1
+	}
+	// Best effort: FAT/exFAT has no ACLs, so the folder is only as private as
+	// the medium; NTFS gets owner-only access instead of the inherited folder ACL.
+	if err := private.Dir(opts.stateDir); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: cannot restrict state directory permissions: %v\n", err)
 	}
 	report.emit(event{Event: "starting", StateDir: opts.stateDir})
 	stateStore, err := store.NewFileStore(logger.Discard, filepath.Join(opts.stateDir, "tailscaled.state"))

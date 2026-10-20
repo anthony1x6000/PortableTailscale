@@ -151,8 +151,10 @@ freerdp/
 ```
 
 The `data` folder is created automatically and contains the Tailscale device
-identity. Keep it private. If it is lost or copied, revoke the device from the
-Tailscale admin console.
+identity. Keep it private. On NTFS, the folder and its files are restricted to
+the current Windows user, SYSTEM and Administrators; removable FAT/exFAT media
+has no ACLs, so there the folder is only as private as the drive. If it is lost
+or copied, revoke the device from the Tailscale admin console.
 
 ## Options
 
