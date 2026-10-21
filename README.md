@@ -239,7 +239,7 @@ commit with `v*` publishes both executables as a GitHub Release.
 The workflow builds with:
 
 ```powershell
-go build -tags=ts_omit_logtail -trimpath -ldflags="-s -w" -o PortableTailscale.exe .
+go build -tags=ts_omit_logtail -trimpath -ldflags="-s -w" -o PortableTailscale.exe .\cmd\portabletailscale
 go build -trimpath -ldflags="-s -w" -o PortableTailscaleRDP.exe .\cmd\tui
 ```
 

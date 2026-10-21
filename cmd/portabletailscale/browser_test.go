@@ -94,7 +94,7 @@ func TestChromiumBrowser(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command(node, filepath.Join("test", "browser.mjs"), configPath)
+	cmd := exec.Command(node, filepath.Join("..", "..", "test", "browser.mjs"), configPath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("chromium browser test failed: %v\n%s", err, output)
