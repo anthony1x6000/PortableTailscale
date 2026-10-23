@@ -248,8 +248,9 @@ under Xvfb.
 
 Download the built executables from the **Actions** run artifacts. Tagging a
 commit with `v*` publishes both executables as a GitHub Release. The
-`PortableTailscale.exe` build prints its version (git commit or tag) at
-startup, so a running window always shows which build it is.
+`PortableTailscale.exe` build prints its version (the git commit it was built
+from, via `--version` or at startup), so a running window always shows which
+build it is.
 
 The workflow builds with:
 

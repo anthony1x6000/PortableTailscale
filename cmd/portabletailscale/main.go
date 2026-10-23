@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"syscall"
@@ -32,9 +33,24 @@ import (
 
 var authURLPattern = regexp.MustCompile(`https://login\.tailscale\.com/a/[A-Za-z0-9_-]+`)
 
-// version is stamped at build time (-X portabletailscale/cmd/portabletailscale.version)
-// so a running window always shows which build produced its behaviour.
-var version = "dev"
+// buildVersion identifies the exact build from the VCS information the Go
+// toolchain embeds in every binary (it survives -trimpath and symbol
+// stripping). The classic -ldflags -X stamping silently stopped working with
+// this toolchain, and buildinfo needs no build flags at all; outside a git
+// checkout it falls back to "dev".
+func buildVersion() string {
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		for _, s := range bi.Settings {
+			if s.Key == "vcs.revision" {
+				if len(s.Value) >= 7 {
+					return s.Value[:7]
+				}
+				return s.Value
+			}
+		}
+	}
+	return "dev"
+}
 
 type options struct {
 	hostname       string
@@ -131,7 +147,7 @@ func main() {
 	}
 	switch {
 	case opts.version:
-		fmt.Println(version)
+		fmt.Println(buildVersion())
 		os.Exit(0)
 	case opts.uninstall:
 		os.Exit(uninstall())
@@ -144,7 +160,7 @@ func main() {
 
 func run(opts options) int {
 	report := &reporter{json: opts.json, color: !opts.json && enableColor()}
-	report.emit(event{Event: "starting", Version: version})
+	report.emit(event{Event: "starting", Version: buildVersion()})
 
 	cleanupStaleRuntimeDirs(os.TempDir(), runtimeDirMaxAge, time.Now())
 	runtimeDir, err := os.MkdirTemp("", runtimeDirPrefix)
