@@ -337,9 +337,8 @@ jobs:
         if: success() && (steps.diff.outputs.has_diff == 'true' || steps.thread.outputs.has_context == 'true')
         run: node scripts/ai-code-review.mjs prepare-payload
 
-      # The security skill alone is 37KB, past the 24KB request limit that
-      # longcat answers 500 above, so this job runs the fleet entries that can
-      # take it and the code review job keeps both.
+      # The security skill alone is 37KB, larger than some fleet entries accept,
+      # so this job names the reviewer that can take it instead of the whole list.
       - name: Call Security Review Models
         if: success() && (steps.diff.outputs.has_diff == 'true' || steps.thread.outputs.has_context == 'true')
         env:
