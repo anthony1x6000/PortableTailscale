@@ -84,7 +84,7 @@ func startControl() (controlURL string, closeAll func()) {
 	httpsrv.Config.TLSNextProto = make(map[string]func(*http.Server, *tls.Conn, http.Handler))
 	httpsrv.StartTLS()
 
-	derpPort := uint16(ln.Addr().(*net.TCPAddr).Port)
+	derpPort := ln.Addr().(*net.TCPAddr).Port
 	control := &testcontrol.Server{
 		DERPMap: &tailcfg.DERPMap{
 			Regions: map[int]*tailcfg.DERPRegion{

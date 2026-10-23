@@ -38,9 +38,15 @@ jobs:
       - name: Build
         run: |
           $ver = if ("${env:GITHUB_REF_TYPE}" -eq "tag") { "${env:GITHUB_REF_NAME}" } else { ${env:GITHUB_SHA}.Substring(0, 7) }
-          go build -tags=ts_omit_logtail -trimpath -ldflags="-s -w -X portabletailscale/cmd/portabletailscale.version=$ver" -o PortableTailscale.exe ./cmd/portabletailscale
+          # ldflags through a variable: passing an inline quoted expression to a
+          # native command loses the -X assignment under pwsh's re-quoting.
+          $ld = "-s -w -X portabletailscale/cmd/portabletailscale.version=$ver"
+          go build -tags=ts_omit_logtail -trimpath -ldflags $ld -o PortableTailscale.exe ./cmd/portabletailscale
           go build -trimpath -ldflags="-s -w" -o PortableTailscaleRDP.exe ./cmd/tui
           go build -trimpath -ldflags="-s -w" -o pt-e2e-harness.exe ./test/harness
+          $stamp = (& .\PortableTailscale.exe --version).Trim()
+          if ($stamp -ne $ver) { throw "version stamp mismatch: exe reports '$stamp', expected '$ver'" }
+          Write-Host "version stamp OK: $stamp"
 
       # Runs PR-modifiable code with runner-level rights (local account,
       # process creation). Safe only because windows-latest is an ephemeral

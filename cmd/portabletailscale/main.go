@@ -43,6 +43,7 @@ type options struct {
 	install        bool
 	uninstall      bool
 	stdio          bool
+	version        bool
 	controlURL     string
 	deprecatedDir  string
 }
@@ -129,6 +130,9 @@ func main() {
 		os.Exit(2)
 	}
 	switch {
+	case opts.version:
+		fmt.Println(version)
+		os.Exit(0)
 	case opts.uninstall:
 		os.Exit(uninstall())
 	case opts.stdio:
@@ -335,7 +339,7 @@ func usageExamples(httpProxy bool, socksURL, host string) string {
 	var b strings.Builder
 	b.WriteString("How to reach your tailnet (replace PORT with your service's port):\n")
 	if httpProxy {
-		b.WriteString("  browser:  open http://" + host + ":PORT/ in Edge or Chrome (restart it once after --install)\n")
+		b.WriteString("  browser:  open http://" + host + ":PORT/ in Edge or Chrome (restart the browser once after the first install)\n")
 		b.WriteString("  terminal: curl.exe -x http://127.0.0.1:41112 http://" + host + ":PORT/\n")
 		b.WriteString("  ssh:      ssh " + host + "\n")
 	} else {
@@ -434,6 +438,7 @@ func parseOptions() (options, error) {
 	flag.BoolVar(&opts.uninstall, "uninstall", false, "remove the browser PAC and SSH config, then exit")
 	flag.StringVar(&opts.controlURL, "control-url", "", "internal: alternate control server URL (used by e2e tests)")
 	flag.BoolVar(&opts.stdio, "stdio", false, "internal: tunnel stdin/stdout to HOST PORT")
+	flag.BoolVar(&opts.version, "version", false, "print the build version and exit")
 	flag.StringVar(&opts.deprecatedDir, "state-dir", "", "deprecated: ignored; no identity is persisted")
 	flag.Parse()
 
