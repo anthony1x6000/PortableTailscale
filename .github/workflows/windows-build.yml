@@ -40,6 +40,10 @@ jobs:
           go build -tags=ts_omit_logtail -trimpath -ldflags="-s -w" -o PortableTailscale.exe ./cmd/portabletailscale
           go build -trimpath -ldflags="-s -w" -o PortableTailscaleRDP.exe ./cmd/tui
 
+      - name: No-admin e2e test
+        shell: pwsh
+        run: ./test/no-admin/no-admin.e2e.ps1 -ExePath ./PortableTailscale.exe -Seconds 30
+
       - name: Smoke test
         run: .\PortableTailscaleRDP.exe --smoke-test
 
