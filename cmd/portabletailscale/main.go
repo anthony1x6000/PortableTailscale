@@ -32,6 +32,10 @@ import (
 
 var authURLPattern = regexp.MustCompile(`https://login\.tailscale\.com/a/[A-Za-z0-9_-]+`)
 
+// version is stamped at build time (-X portabletailscale/cmd/portabletailscale.version)
+// so a running window always shows which build produced its behaviour.
+var version = "dev"
+
 type options struct {
 	hostname       string
 	json           bool
@@ -45,6 +49,7 @@ type options struct {
 type event struct {
 	Event       string `json:"event"`
 	Message     string `json:"message,omitempty"`
+	Version     string `json:"version,omitempty"`
 	AuthURL     string `json:"authUrl,omitempty"`
 	ProxyURL    string `json:"proxyUrl,omitempty"`
 	ProxyAddr   string `json:"proxyAddress,omitempty"`
@@ -74,7 +79,7 @@ func (r *reporter) emit(e event) {
 	case "starting":
 		fmt.Println(header(r.color))
 		fmt.Println()
-		fmt.Println("Starting Portable Tailscale (ephemeral session)")
+		fmt.Printf("Starting Portable Tailscale %s (ephemeral session)\n", e.Version)
 	case "auth":
 		fmt.Printf("Authenticate this device:\n%s\n", e.AuthURL)
 	case "connected":
@@ -134,7 +139,7 @@ func main() {
 
 func run(opts options) int {
 	report := &reporter{json: opts.json, color: !opts.json && enableColor()}
-	report.emit(event{Event: "starting"})
+	report.emit(event{Event: "starting", Version: version})
 
 	cleanupStaleRuntimeDirs(os.TempDir(), runtimeDirMaxAge, time.Now())
 	runtimeDir, err := os.MkdirTemp("", runtimeDirPrefix)
@@ -194,6 +199,12 @@ func run(opts options) int {
 		(dataErr == nil && browserConfigured(dataDir)) ||
 		(sshErr == nil && hasSSHBlock(sshPath))
 	if needHTTPProxy && dataErr == nil {
+		// Drop any PAC a previous run left behind before the node starts: it
+		// points at a dead port, makes tailscale's control client log winhttp
+		// "unable to download script" errors, and would send browsers through
+		// a dead proxy if this run never reaches sign-in. A fresh PAC is set
+		// after connecting (installBrowserPAC / reactivateBrowserPAC).
+		_ = deactivateBrowserPAC(dataDir)
 		// Do not leave a PAC pointing at a dead loopback port after exit.
 		defer func() { _ = deactivateBrowserPAC(dataDir) }()
 	}

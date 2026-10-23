@@ -37,8 +37,22 @@ jobs:
 
       - name: Build
         run: |
-          go build -tags=ts_omit_logtail -trimpath -ldflags="-s -w" -o PortableTailscale.exe ./cmd/portabletailscale
+          $ver = if ("${env:GITHUB_REF_TYPE}" -eq "tag") { "${env:GITHUB_REF_NAME}" } else { ${env:GITHUB_SHA}.Substring(0, 7) }
+          go build -tags=ts_omit_logtail -trimpath -ldflags="-s -w -X portabletailscale/cmd/portabletailscale.version=$ver" -o PortableTailscale.exe ./cmd/portabletailscale
           go build -trimpath -ldflags="-s -w" -o PortableTailscaleRDP.exe ./cmd/tui
+
+      # Runs PR-modifiable code with runner-level rights (local account,
+      # process creation). Safe only because windows-latest is an ephemeral
+      # GitHub-hosted runner; do not move this job to self-hosted runners or
+      # pull_request_target.
+      - name: No-admin e2e test
+        shell: pwsh
+        env:
+          # Optional: an ephemeral Tailscale auth key lets the audit cover the
+          # post-login data path (where the firewall prompt used to appear).
+          # Without it the audit covers startup up to the sign-in URL.
+          TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
+        run: ./test/no-admin/no-admin.e2e.ps1 -ExePath ./PortableTailscale.exe -Seconds 60
 
       - name: Smoke test
         run: .\PortableTailscaleRDP.exe --smoke-test
