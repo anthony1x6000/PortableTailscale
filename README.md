@@ -149,6 +149,12 @@ A new port and password are generated each run. Use it with any application
 that supports an authenticated SOCKS5 proxy. Browsers cannot send SOCKS5
 credentials, which is why the PAC/HTTP proxy exists.
 
+On Windows, point SOCKS5 clients only at tailnet names or Tailscale IPs. The
+embedded node resolves any other name through upstream DNS over a wildcard
+UDP socket, which is the one thing left in the data path that can make
+Windows show its firewall dialog; the PAC/SSH paths only ever resolve tailnet
+names and are not affected.
+
 ## RDP example
 
 `PortableTailscaleRDP.exe` is an example client included with the project. It
@@ -241,7 +247,9 @@ Linux workflow runs race tests, short fuzz runs, and the real Chromium PAC test
 under Xvfb.
 
 Download the built executables from the **Actions** run artifacts. Tagging a
-commit with `v*` publishes both executables as a GitHub Release.
+commit with `v*` publishes both executables as a GitHub Release. The
+`PortableTailscale.exe` build prints its version (git commit or tag) at
+startup, so a running window always shows which build it is.
 
 The workflow builds with:
 
