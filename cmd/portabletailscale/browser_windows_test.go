@@ -256,3 +256,36 @@ func TestBrowserReactivateIgnoresForeignPAC(t *testing.T) {
 		t.Fatalf("foreign PAC was replaced: %q", current)
 	}
 }
+
+func TestClearOrphanPAC(t *testing.T) {
+	withTestRegistry(t)
+	dataDir := t.TempDir() // no backup here: the orphan case
+
+	setTestAutoConfig(t, "http://corp.example/proxy.pac")
+	if err := clearOrphanPAC(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	if current, err := readAutoConfigURL(); err != nil || current != "http://corp.example/proxy.pac" {
+		t.Fatalf("foreign PAC was modified: %q, %v", current, err)
+	}
+
+	setTestAutoConfig(t, pacBaseURL()+"?t=stale&v=1")
+	if err := clearOrphanPAC(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	if current, err := readAutoConfigURL(); err != nil || current != "" {
+		t.Fatalf("orphaned PAC was not cleared: %q, %v", current, err)
+	}
+
+	// With a local backup the restore belongs to deactivateBrowserPAC.
+	if err := installBrowserPAC(dataDir, pacURLFor("tok", time.Unix(1, 0))); err != nil {
+		t.Fatal(err)
+	}
+	setTestAutoConfig(t, pacBaseURL()+"?t=live&v=2")
+	if err := clearOrphanPAC(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	if current, err := readAutoConfigURL(); err != nil || current != pacBaseURL()+"?t=live&v=2" {
+		t.Fatalf("backed-up PAC was touched by the orphan clear: %q, %v", current, err)
+	}
+}

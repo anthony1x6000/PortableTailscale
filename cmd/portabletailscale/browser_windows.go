@@ -206,6 +206,31 @@ func deactivateBrowserPAC(dataDir string) error {
 	return nil
 }
 
+// clearOrphanPAC removes a PAC that points at this program's loopback proxy
+// when no backup exists beside the executable — left behind by an install
+// from a different directory whose backup this one cannot restore from.
+// Leaving it would keep browsers (and tailscale's own control client, via
+// winhttp) pointed at a dead port. Only this program's PAC base is touched;
+// a concurrently running instance would need to re-install its PAC, but the
+// alternative is a permanently stale setting.
+func clearOrphanPAC(dataDir string) error {
+	if browserConfigured(dataDir) {
+		return nil // deactivateBrowserPAC handles the backed-up case
+	}
+	current, err := readAutoConfigURL()
+	if err != nil {
+		return err
+	}
+	if !strings.HasPrefix(current, pacBaseURL()) {
+		return nil
+	}
+	if err := writeAutoConfigURL(""); err != nil {
+		return err
+	}
+	refreshWinINET()
+	return nil
+}
+
 func uninstallBrowserPAC(dataDir string) error {
 	if dataDir == "" {
 		return nil

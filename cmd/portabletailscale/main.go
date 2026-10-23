@@ -43,6 +43,7 @@ type options struct {
 	install        bool
 	uninstall      bool
 	stdio          bool
+	controlURL     string
 	deprecatedDir  string
 }
 
@@ -185,12 +186,13 @@ func run(opts options) int {
 	avoidWindowsFirewallPrompt(runtime.GOOS)
 
 	srv := &tsnet.Server{
-		Dir:       runtimeDir,
-		Store:     stateStore,
-		Hostname:  opts.hostname,
-		Ephemeral: true,
-		UserLogf:  userLogf,
-		Logf:      logger.Discard,
+		Dir:        runtimeDir,
+		Store:      stateStore,
+		Hostname:   opts.hostname,
+		Ephemeral:  true,
+		ControlURL: opts.controlURL,
+		UserLogf:   userLogf,
+		Logf:       logger.Discard,
 	}
 
 	dataDir, dataErr := executableDataDir()
@@ -198,11 +200,13 @@ func run(opts options) int {
 	// points at a dead port, makes tailscale's control client log winhttp
 	// "unable to download script" errors, and would send browsers through a
 	// dead proxy if this run never reaches sign-in. A fresh PAC is set after
-	// connecting (installBrowserPAC / reactivateBrowserPAC). Without a saved
-	// backup this is a no-op.
+	// connecting (installBrowserPAC / reactivateBrowserPAC).
 	if dataErr == nil {
 		_ = deactivateBrowserPAC(dataDir)
 	}
+	// A PAC can also be orphaned by an install from a different directory,
+	// whose backup this executable cannot see; clear that too.
+	_ = clearOrphanPAC(dataDir)
 	sshPath, sshErr := sshConfigPath()
 	needHTTPProxy := opts.install ||
 		(dataErr == nil && browserConfigured(dataDir)) ||
@@ -310,6 +314,9 @@ func run(opts options) int {
 		connected.PACURL = pacURL
 	}
 	report.emit(connected)
+	if !needHTTPProxy {
+		report.emit(event{Event: "message", Message: "Browser and SSH access are not configured here; the loopback HTTP proxy (127.0.0.1:41112) is off. Run once with --install to enable it, then restart your browser."})
+	}
 
 	<-ctx.Done()
 	report.emit(event{Event: "stopping"})
@@ -403,6 +410,7 @@ func parseOptions() (options, error) {
 	flag.BoolVar(&opts.noBrowser, "no-browser", false, "print the authentication URL without opening it")
 	flag.BoolVar(&opts.install, "install", false, "install the browser PAC and SSH config, then run")
 	flag.BoolVar(&opts.uninstall, "uninstall", false, "remove the browser PAC and SSH config, then exit")
+	flag.StringVar(&opts.controlURL, "control-url", "", "internal: alternate control server URL (used by e2e tests)")
 	flag.BoolVar(&opts.stdio, "stdio", false, "internal: tunnel stdin/stdout to HOST PORT")
 	flag.StringVar(&opts.deprecatedDir, "state-dir", "", "deprecated: ignored; no identity is persisted")
 	flag.Parse()
