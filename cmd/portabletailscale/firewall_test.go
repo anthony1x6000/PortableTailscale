@@ -3,11 +3,20 @@ package main
 import (
 	"os"
 	"testing"
+
+	"tailscale.com/envknob"
 )
 
-var firewallKnobs = []string{"TS_DEBUG_ALWAYS_USE_DERP", "TS_DISABLE_PORTMAPPER"}
+var firewallKnobs = []string{"TS_DEBUG_ALWAYS_USE_DERP", "TS_DISABLE_PORTMAPTER"}
 
 func TestAvoidWindowsFirewallPrompt(t *testing.T) {
+	// t.Setenv restores the process env, but envknob.Setenv also mutates the
+	// tsnet knob registry, which outlives the test; reset both.
+	t.Cleanup(func() {
+		for _, name := range firewallKnobs {
+			envknob.Setenv(name, "")
+		}
+	})
 	for _, name := range firewallKnobs {
 		t.Setenv(name, "")
 	}
