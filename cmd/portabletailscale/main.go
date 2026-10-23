@@ -314,13 +314,35 @@ func run(opts options) int {
 		connected.PACURL = pacURL
 	}
 	report.emit(connected)
-	if !needHTTPProxy {
-		report.emit(event{Event: "message", Message: "Browser and SSH access are not configured here; the loopback HTTP proxy (127.0.0.1:41112) is off. Run once with --install to enable it, then restart your browser."})
+	// Short, copy-pasteable ways in, shown right after authentication.
+	exampleHost := "machine-name"
+	if len(peers.Names) > 0 {
+		exampleHost = peers.Names[0]
 	}
+	// socks5h:// makes clients resolve the name through the proxy (tailnet
+	// MagicDNS), not through the local system resolver where it does not exist.
+	report.emit(event{Event: "message", Message: usageExamples(needHTTPProxy, strings.Replace(proxyURL, "socks5://", "socks5h://", 1), exampleHost)})
 
 	<-ctx.Done()
 	report.emit(event{Event: "stopping"})
 	return 0
+}
+
+// usageExamples renders the post-login cheat sheet: a few short lines with
+// real values (the SOCKS URL and a peer name from the tailnet map) so they
+// can be copied straight into a browser or terminal.
+func usageExamples(httpProxy bool, socksURL, host string) string {
+	var b strings.Builder
+	b.WriteString("How to reach your tailnet (replace PORT with your service's port):\n")
+	if httpProxy {
+		b.WriteString("  browser:  open http://" + host + ":PORT/ in Edge or Chrome (restart it once after --install)\n")
+		b.WriteString("  terminal: curl.exe -x http://127.0.0.1:41112 http://" + host + ":PORT/\n")
+		b.WriteString("  ssh:      ssh " + host + "\n")
+	} else {
+		b.WriteString("  browser/ssh need a one-time setup: run once with --install, then restart this program and your browser\n")
+	}
+	b.WriteString("  socks5:   curl.exe -x " + socksURL + " http://" + host + ":PORT/")
+	return b.String()
 }
 
 // avoidWindowsFirewallPrompt keeps every socket in the embedded Tailscale node
