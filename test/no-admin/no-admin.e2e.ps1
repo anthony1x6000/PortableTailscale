@@ -11,11 +11,14 @@
 #   2. it runs as a freshly created *standard* user, from a directory that
 #      user may write (the runner workspace is not readable by arbitrary
 #      local users), and keeps running for the whole audit window,
-#   3. it never owns a non-loopback socket: no non-loopback TCP listener and
-#      no non-loopback UDP endpoint at all (zero tolerance — even a brief
-#      wildcard UDP bind can trigger the dialog). The guarded sockets —
-#      magicsock's WireGuard UDP, the UPnP portmapper, and any DNS-forwarder
-#      UDP — appear at engine start or after login, both inside the window,
+#   3. it never owns a non-loopback socket in any sample: no non-loopback TCP
+#      listener and no non-loopback UDP endpoint at all — a single sighting
+#      fails the run. The guarded sockets — magicsock's WireGuard UDP, the
+#      UPnP portmapper, and any DNS-forwarder UDP — are bound from engine
+#      start onward and live for the process lifetime, well above the sample
+#      interval; sub-second binds cannot be excluded by sampling, and the
+#      README documents the one remaining known path (upstream DNS via
+#      SOCKS5 to non-tailnet names),
 #   4. it actually progresses: the log must show the sign-in URL event (or,
 #      when the TS_AUTHKEY secret is provided, the connected event), an
 #      established outbound connection to Tailscale control/DERP, and at
@@ -38,7 +41,7 @@
 param(
     [Parameter(Mandatory = $true)] [string] $ExePath,
     [int] $Seconds = 60,
-    [int] $SampleSeconds = 2
+    [int] $SampleSeconds = 1
 )
 
 $ErrorActionPreference = 'Stop'
@@ -79,6 +82,15 @@ function Read-Events {
     return $events
 }
 
+function Get-LogDetail {
+    # Dumped output with URLs redacted: the sign-in URL is a credential for
+    # the pending node enrollment and must not land in public CI logs.
+    if (Test-Path $outLog) {
+        return ((Get-Content $outLog -Raw -ErrorAction SilentlyContinue) -replace 'https?://\S+', '[url]')
+    }
+    return 'no output captured'
+}
+
 try {
     # 1. The image must not ask Windows to elevate it.
     $bytes = [System.IO.File]::ReadAllBytes($srcExe)
@@ -104,10 +116,13 @@ try {
         Stop-Process -Force -ErrorAction SilentlyContinue
     # cmd /c runs the exe and redirects its output where we can read it;
     # Start-Process -Credential (CreateProcessWithLogonW) cannot redirect
-    # itself. cmd stays alive as the exe's parent while the exe runs.
-    $cmdLine = '"{0}" --no-browser --json > "{1}" 2>&1' -f $auditExe, $outLog
+    # itself. Paths have no spaces, so the command line stays quote-free —
+    # PowerShell 7.3+ re-quotes ArgumentList elements that contain quotes
+    # and hands cmd mangled input. cmd stays alive as the exe's parent while
+    # the exe runs.
+    $cmdLine = '{0} --no-browser --json > {1} 2>&1' -f $auditExe, $outLog
     $credential = New-Object System.Management.Automation.PSCredential($user, $securePassword)
-    $cmdProc = Start-Process -FilePath "$env:ComSpec" -ArgumentList '/c', $cmdLine -WorkingDirectory $auditDir -Credential $credential -LoadUserProfile -WindowStyle Hidden -PassThru
+    $cmdProc = Start-Process -FilePath "$env:ComSpec" -ArgumentList "/c $cmdLine" -WorkingDirectory $auditDir -Credential $credential -LoadUserProfile -WindowStyle Hidden -PassThru
     $cmdPid = $cmdProc.Id
 
     $deadline = (Get-Date).AddSeconds(30)
@@ -118,8 +133,7 @@ try {
         else { Start-Sleep -Milliseconds 500 }
     }
     if (-not $targetPid) {
-        $detail = if (Test-Path $outLog) { (Get-Content $outLog -Raw) } else { 'no output captured' }
-        throw "the exe never started as a standard user; output: $detail"
+        throw ("the exe never started as a standard user; output: {0}" -f (Get-LogDetail))
     }
     $instance = Get-CimInstance Win32_Process -Filter "ProcessId = $targetPid"
     $owner = $instance | Invoke-CimMethod -MethodName GetOwner
@@ -134,8 +148,7 @@ try {
     $deadline = (Get-Date).AddSeconds($Seconds)
     while ((Get-Date) -lt $deadline) {
         if (-not (Get-Process -Id $targetPid -ErrorAction SilentlyContinue)) {
-            $detail = if (Test-Path $outLog) { (Get-Content $outLog -Raw) } else { 'no output captured' }
-            throw "the exe exited early while running as $user; output: $detail"
+            throw ("the exe exited early while running as $user; output: {0}" -f (Get-LogDetail))
         }
         foreach ($ep in @(Get-NetUDPEndpoint | Where-Object { $_.OwningProcess -eq $targetPid })) {
             $sawSocket = $true
@@ -165,7 +178,7 @@ try {
     $events = Read-Events
     if ($haveAuthKey) {
         if (-not $events.ContainsKey('connected')) {
-            throw ("TS_AUTHKEY was provided but the exe never reached the connected state; events seen: {0}; output tail: {1}" -f ($events.Keys -join ','), ((Get-Content $outLog -Raw -ErrorAction SilentlyContinue) -split "`n" | Select-Object -Last 5))
+            throw ("TS_AUTHKEY was provided but the exe never reached the connected state; events seen: {0}; output tail: {1}" -f ($events.Keys -join ','), ((Get-LogDetail) -split "`n" | Select-Object -Last 5))
         }
     }
     elseif (-not $events.ContainsKey('auth')) {
@@ -179,11 +192,14 @@ catch {
 }
 finally {
     $cleanupErrors = @()
-    if ($targetPid) {
+    if ($targetPid -and (Get-Process -Id $targetPid -ErrorAction SilentlyContinue)) {
         try { Stop-Process -Id $targetPid -Force -ErrorAction Stop } catch { $cleanupErrors += $_.Exception.Message }
     }
     if ($cmdProc) {
-        try { Stop-Process -Id $cmdProc.Id -Force -ErrorAction Stop } catch { $cleanupErrors += $_.Exception.Message }
+        $cmdProc.Refresh()
+        if (-not $cmdProc.HasExited) {
+            try { Stop-Process -Id $cmdProc.Id -Force -ErrorAction Stop } catch { $cleanupErrors += $_.Exception.Message }
+        }
     }
     try { Remove-LocalUser -Name $user -ErrorAction Stop } catch { $cleanupErrors += $_.Exception.Message }
     if (Test-Path $auditDir) {

@@ -48,10 +48,11 @@ jobs:
       - name: No-admin e2e test
         shell: pwsh
         env:
-          # Optional: an ephemeral Tailscale auth key lets the audit cover the
+          # An ephemeral Tailscale auth key lets the audit cover the
           # post-login data path (where the firewall prompt used to appear).
-          # Without it the audit covers startup up to the sign-in URL.
-          TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
+          # Only trusted refs (main, tags, manual runs) get the secret; PR
+          # runs audit startup up to the sign-in URL with no key.
+          TS_AUTHKEY: ${{ github.event_name != 'pull_request' && secrets.TS_AUTHKEY || '' }}
         run: ./test/no-admin/no-admin.e2e.ps1 -ExePath ./PortableTailscale.exe -Seconds 60
 
       - name: Smoke test

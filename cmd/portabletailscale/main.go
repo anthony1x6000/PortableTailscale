@@ -194,17 +194,20 @@ func run(opts options) int {
 	}
 
 	dataDir, dataErr := executableDataDir()
+	// Drop any PAC a previous run left behind before the node starts: it
+	// points at a dead port, makes tailscale's control client log winhttp
+	// "unable to download script" errors, and would send browsers through a
+	// dead proxy if this run never reaches sign-in. A fresh PAC is set after
+	// connecting (installBrowserPAC / reactivateBrowserPAC). Without a saved
+	// backup this is a no-op.
+	if dataErr == nil {
+		_ = deactivateBrowserPAC(dataDir)
+	}
 	sshPath, sshErr := sshConfigPath()
 	needHTTPProxy := opts.install ||
 		(dataErr == nil && browserConfigured(dataDir)) ||
 		(sshErr == nil && hasSSHBlock(sshPath))
 	if needHTTPProxy && dataErr == nil {
-		// Drop any PAC a previous run left behind before the node starts: it
-		// points at a dead port, makes tailscale's control client log winhttp
-		// "unable to download script" errors, and would send browsers through
-		// a dead proxy if this run never reaches sign-in. A fresh PAC is set
-		// after connecting (installBrowserPAC / reactivateBrowserPAC).
-		_ = deactivateBrowserPAC(dataDir)
 		// Do not leave a PAC pointing at a dead loopback port after exit.
 		defer func() { _ = deactivateBrowserPAC(dataDir) }()
 	}

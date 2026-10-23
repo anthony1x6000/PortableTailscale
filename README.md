@@ -247,9 +247,9 @@ Linux workflow runs race tests, short fuzz runs, and the real Chromium PAC test
 under Xvfb.
 
 Download the built executables from the **Actions** run artifacts. Tagging a
-commit with `v*` publishes both executables as a GitHub Release. Every build
-prints its version (git commit or tag) at startup, so a running window always
-shows which build it is.
+commit with `v*` publishes both executables as a GitHub Release. The
+`PortableTailscale.exe` build prints its version (git commit or tag) at
+startup, so a running window always shows which build it is.
 
 The workflow builds with:
 
