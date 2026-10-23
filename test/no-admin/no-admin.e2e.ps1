@@ -83,10 +83,12 @@ function Read-Events {
 }
 
 function Get-LogDetail {
-    # Dumped output with URLs redacted: the sign-in URL is a credential for
-    # the pending node enrollment and must not land in public CI logs.
+    # Dumped output sanitized for public CI logs: any absolute or
+    # credentialed URL (sign-in URLs enroll the pending node, SOCKS5 URLs
+    # carry generated passwords) and raw tskey- auth keys are redacted.
     if (Test-Path $outLog) {
-        return ((Get-Content $outLog -Raw -ErrorAction SilentlyContinue) -replace 'https?://\S+', '[url]')
+        $raw = Get-Content $outLog -Raw -ErrorAction SilentlyContinue
+        return (($raw -replace '(?i)\b[a-z][a-z0-9+.\-]*://\S+', '[url]') -replace 'tskey-\S+', '[authkey]')
     }
     return 'no output captured'
 }
@@ -111,6 +113,13 @@ try {
     Copy-Item $srcExe $auditExe
     icacls $auditDir /grant "${user}:(OI)(CI)M" /T | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "icacls grant for $user failed with exit code $LASTEXITCODE" }
+    # The child inherits the parent step's TEMP/TMP (the runner admin's
+    # profile), which the standard user cannot write — os.MkdirTemp dies with
+    # "Access is denied". Point the environment at directories the standard
+    # user owns instead.
+    $tmpDir = Join-Path $auditDir 'tmp'
+    $profileDir = "C:\Users\$user"
+    New-Item -ItemType Directory -Path $tmpDir | Out-Null
 
     Get-Process -Name 'PortableTailscale' -ErrorAction SilentlyContinue |
         Stop-Process -Force -ErrorAction SilentlyContinue
@@ -120,7 +129,7 @@ try {
     # PowerShell 7.3+ re-quotes ArgumentList elements that contain quotes
     # and hands cmd mangled input. cmd stays alive as the exe's parent while
     # the exe runs.
-    $cmdLine = '{0} --no-browser --json > {1} 2>&1' -f $auditExe, $outLog
+    $cmdLine = 'set TMP={0}& set TEMP={0}& set USERPROFILE={1}& {2} --no-browser --json > {3} 2>&1' -f $tmpDir, $profileDir, $auditExe, $outLog
     $credential = New-Object System.Management.Automation.PSCredential($user, $securePassword)
     $cmdProc = Start-Process -FilePath "$env:ComSpec" -ArgumentList "/c $cmdLine" -WorkingDirectory $auditDir -Credential $credential -LoadUserProfile -WindowStyle Hidden -PassThru
     $cmdPid = $cmdProc.Id
