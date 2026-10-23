@@ -50,9 +50,9 @@ jobs:
         env:
           # An ephemeral Tailscale auth key lets the audit cover the
           # post-login data path (where the firewall prompt used to appear).
-          # Allowlisted refs only (main, tags, manual runs): PR runs audit
-          # startup up to the sign-in URL and can never touch the secret.
-          TS_AUTHKEY: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch') && secrets.TS_AUTHKEY || '' }}
+          # Ref-based allowlist only (main, tags): a dispatch or push of any
+          # other branch runs PR-modifiable code and never sees the secret.
+          TS_AUTHKEY: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) && secrets.TS_AUTHKEY || '' }}
         run: ./test/no-admin/no-admin.e2e.ps1 -ExePath ./PortableTailscale.exe -Seconds 60
 
       - name: Smoke test
