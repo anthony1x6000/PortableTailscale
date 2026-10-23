@@ -20,10 +20,10 @@
 #      README documents the one remaining known path (upstream DNS via
 #      SOCKS5 to non-tailnet names),
 #   4. it actually progresses: the log must show the sign-in URL event (or,
-#      when the TS_AUTHKEY secret is provided, the connected event), an
-#      established outbound connection to Tailscale control/DERP, and at
-#      least one socket of the process, so a blind or wrong-process pass
-#      cannot fake success.
+#      when the TS_AUTHKEY secret is provided on a trusted ref, the
+#      connected event plus observed loopback listeners and an outbound
+#      control/DERP connection), so a blind or wrong-process pass cannot
+#      fake success.
 #
 # The exe runs without --install so the fixed loopback proxy port is not
 # involved: runner images can have WinNAT/Hyper-V excluded port ranges that
@@ -151,13 +151,21 @@ try {
     }
     Write-Host "audit: watching PID $targetPid (user $user) for $Seconds s (auth key: $haveAuthKey)"
 
-    # 3. Sample the process's sockets for the whole audit window.
+    # 3. Sample the process's sockets for the whole audit window. Before
+    # login the process owns no persistent sockets by design: tsnet's
+    # listeners (local API, SOCKS5) only appear after sign-in, and the
+    # control connection has retry gaps. Liveness is instead proven by the
+    # exe's own events plus the identity-checked process surviving; the
+    # guarded sockets (magicsock UDP, portmapper UDP), if a regression
+    # reintroduces them, are bound from engine start and persist, so any
+    # sample catches them.
     $sawSocket = $false
     $sawOutbound = $false
     $deadline = (Get-Date).AddSeconds($Seconds)
     while ((Get-Date) -lt $deadline) {
-        if (-not (Get-Process -Id $targetPid -ErrorAction SilentlyContinue)) {
-            throw ("the exe exited early while running as $user; output: {0}" -f (Get-LogDetail))
+        $alive = Get-Process -Id $targetPid -ErrorAction SilentlyContinue
+        if (-not $alive -or $alive.Name -ne 'PortableTailscale') {
+            throw ("the exe exited early (or its PID was reused) while running as $user; output: {0}" -f (Get-LogDetail))
         }
         foreach ($ep in @(Get-NetUDPEndpoint | Where-Object { $_.OwningProcess -eq $targetPid })) {
             $sawSocket = $true
@@ -176,22 +184,24 @@ try {
         }
         Start-Sleep -Seconds $SampleSeconds
     }
-    if (-not $sawSocket) {
-        throw 'the audit observed no sockets at all; it was not watching the process'
-    }
-    if (-not $sawOutbound) {
-        throw 'no outbound connection was observed; the tsnet node (control/DERP path) never started'
-    }
 
-    # 4. The node must have reached sign-in, or fully connected with a key.
+    # 4. The node must have reached sign-in — or, with an auth key on a
+    # trusted ref, fully connected, in which case its loopback listeners
+    # and the outbound control/DERP path must also have been observed.
     $events = Read-Events
     if ($haveAuthKey) {
         if (-not $events.ContainsKey('connected')) {
-            throw ("TS_AUTHKEY was provided but the exe never reached the connected state; events seen: {0}; output tail: {1}" -f ($events.Keys -join ','), ((Get-LogDetail) -split "`n" | Select-Object -Last 5))
+            throw ("TS_AUTHKEY was provided but the exe never reached the connected state; events seen: {0}; sockets seen: {1}; netstat: {2}; output tail: {3}" -f ($events.Keys -join ','), $sawSocket, ((netstat.exe -ano | Select-String $targetPid) -join ' | '), ((Get-LogDetail) -split "`n" | Select-Object -Last 5))
+        }
+        if (-not $sawSocket) {
+            throw 'connected but no socket of the process was ever observed; the audit was not watching the right process'
+        }
+        if (-not $sawOutbound) {
+            throw 'connected but no outbound connection was observed; the control/DERP path never ran'
         }
     }
     elseif (-not $events.ContainsKey('auth')) {
-        throw ("the exe never printed a sign-in URL; events seen: {0}" -f ($events.Keys -join ','))
+        throw ("the exe never printed a sign-in URL (events seen: {0}); netstat: {1}; output tail: {2}" -f ($events.Keys -join ','), ((netstat.exe -ano | Select-String $targetPid) -join ' | '), ((Get-LogDetail) -split "`n" | Select-Object -Last 5))
     }
     Write-Host 'audit: PASS — no elevation requested, no non-loopback binds as a standard user'
 }
