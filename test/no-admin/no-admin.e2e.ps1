@@ -45,7 +45,10 @@ $ErrorActionPreference = 'Stop'
 
 $loopback = @('127.0.0.1', '::1')
 $srcExe = (Resolve-Path $ExePath).Path
-$auditDir = Join-Path $env:RUNNER_TEMP 'pt-no-admin-e2e'
+# Root of the system drive, not a user profile tree: the runner's profile
+# ACLs do not necessarily allow other local users even with an explicit
+# grant, and a profile Temp dir adds another moving part.
+$auditDir = 'C:\pt-no-admin-e2e'
 $auditExe = Join-Path $auditDir 'PortableTailscale.exe'
 
 # Random per-run throwaway account; the password meets complexity rules by
@@ -80,6 +83,7 @@ try {
     New-Item -ItemType Directory -Path $auditDir | Out-Null
     Copy-Item $srcExe $auditExe
     icacls $auditDir /grant "${user}:(OI)(CI)RX" /T | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "icacls grant for $user failed with exit code $LASTEXITCODE" }
 
     Get-Process -Name 'PortableTailscale' -ErrorAction SilentlyContinue |
         Stop-Process -Force -ErrorAction SilentlyContinue
@@ -92,9 +96,24 @@ try {
     # guaranteed a socket to observe; sign-in is never completed in CI.
     $targetProc = Start-Process -FilePath $auditExe -ArgumentList '--install', '--no-browser' -WorkingDirectory $auditDir -Credential $credential -LoadUserProfile -WindowStyle Hidden -PassThru
     $targetPid = $targetProc.Id
-    $owner = Get-CimInstance Win32_Process -Filter "ProcessId = $targetPid" | Invoke-CimMethod -MethodName GetOwner
+    # WMI can lag process creation by a moment; poll for the instance and
+    # the owner instead of demanding it in the same millisecond.
+    $deadline = (Get-Date).AddSeconds(15)
+    $owner = $null
+    while ((Get-Date) -lt $deadline) {
+        $targetProc.Refresh()
+        if ($targetProc.HasExited) {
+            throw ("the exe exited early while running as {0} (exit code {1})" -f $user, $targetProc.ExitCode)
+        }
+        $instance = Get-CimInstance Win32_Process -Filter "ProcessId = $targetPid"
+        if ($instance) {
+            $owner = $instance | Invoke-CimMethod -MethodName GetOwner
+            if ($owner -and $owner.User -eq $user) { break }
+        }
+        Start-Sleep -Milliseconds 500
+    }
     if (-not $owner -or $owner.User -ne $user) {
-        throw "the audited process is owned by '$($owner.User)', not by the standard user '$user'"
+        throw "could not confirm the audited process runs as the standard user '$user'"
     }
     Write-Host "audit: watching PID $targetPid (user $user) for $Seconds s"
 
