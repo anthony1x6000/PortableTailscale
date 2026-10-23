@@ -111,10 +111,7 @@ adapter, change system DNS, or require administrator rights.
   firewall dialog, which a standard user cannot dismiss, so on Windows the
   Tailscale node gives up its direct UDP paths: all tailnet traffic is relayed
   through Tailscale's DERP servers and never uses LAN-direct connections. This
-  is the price of running with no administrator rights at all; CI enforces it
-  with an end-to-end audit (`test/no-admin/no-admin.e2e.ps1`) that fails if the
-  process is ever seen owning a non-loopback UDP socket or TCP listener while
-  running as a standard user.
+  is the price of running with no administrator rights at all.
 - **Covered:** Chromium browsers using the system proxy, SSH/SCP/SFTP through the
   managed `ProxyCommand`, and any app you point at the loopback HTTP proxy, e.g.
   `curl -x http://127.0.0.1:41112 http://magicdns-name:8080/`.
