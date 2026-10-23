@@ -225,8 +225,12 @@ func run(opts options) int {
 		_ = deactivateBrowserPAC(dataDir)
 	}
 	// A PAC can also be orphaned by an install from a different directory,
-	// whose backup this executable cannot see; clear that too.
-	_ = clearOrphanPAC(dataDir)
+	// whose backup this executable cannot see; clear that too. Only with a
+	// usable data directory: without one there is no way to tell a restorable
+	// PAC from an orphan.
+	if dataErr == nil {
+		_ = clearOrphanPAC(dataDir)
+	}
 	sshPath, sshErr := sshConfigPath()
 	needHTTPProxy := opts.install ||
 		(dataErr == nil && browserConfigured(dataDir)) ||
@@ -461,10 +465,30 @@ func parseOptions() (options, error) {
 	if opts.install && opts.uninstall {
 		return options{}, errors.New("--install and --uninstall are mutually exclusive")
 	}
+	if opts.controlURL != "" {
+		var err error
+		if opts.controlURL, err = parseControlURL(opts.controlURL); err != nil {
+			return options{}, err
+		}
+	}
 	if opts.deprecatedDir != "" {
 		fmt.Fprintln(os.Stderr, "warning: --state-dir is ignored; PortableTailscale no longer persists an identity")
 	}
 	return opts, nil
+}
+
+// parseControlURL accepts only loopback control servers. The flag exists for
+// the e2e harness's local fake control; a remote value would let a launcher
+// redirect this node's login at a server it does not control.
+func parseControlURL(raw string) (string, error) {
+	host := ""
+	if u, err := url.Parse(raw); err == nil {
+		host = u.Hostname()
+	}
+	if host != "localhost" && host != "127.0.0.1" && host != "::1" {
+		return "", fmt.Errorf("--control-url: only loopback control servers are supported (got host %q)", host)
+	}
+	return raw, nil
 }
 
 func executableDirectory() (string, error) {

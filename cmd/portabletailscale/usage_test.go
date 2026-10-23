@@ -31,3 +31,17 @@ func TestUsageExamples(t *testing.T) {
 		t.Errorf("usageExamples(no http) must not advertise the inactive proxy:\n%s", withoutProxy)
 	}
 }
+
+func TestControlURLLoopbackOnly(t *testing.T) {
+	for _, ok := range []string{"http://127.0.0.1:1234", "http://localhost:9", "http://[::1]:8080/"} {
+		opts, err := parseControlURL(ok)
+		if err != nil || opts != ok {
+			t.Errorf("parseControlURL(%q) = %q, %v; want accepted", ok, opts, err)
+		}
+	}
+	for _, bad := range []string{"https://controlplane.tailscale.com", "http://10.0.0.1:8080", "not a url", "http://evil.example:1"} {
+		if _, err := parseControlURL(bad); err == nil {
+			t.Errorf("parseControlURL(%q) accepted a non-loopback control server", bad)
+		}
+	}
+}
