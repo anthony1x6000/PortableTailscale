@@ -7,7 +7,7 @@ import (
 	"tailscale.com/envknob"
 )
 
-var firewallKnobs = []string{"TS_DEBUG_ALWAYS_USE_DERP", "TS_DISABLE_PORTMAPTER"}
+var firewallKnobs = []string{"TS_DEBUG_ALWAYS_USE_DERP", "TS_DISABLE_PORTMAPPER"}
 
 func TestAvoidWindowsFirewallPrompt(t *testing.T) {
 	// t.Setenv restores the process env, but envknob.Setenv also mutates the

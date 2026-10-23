@@ -1,7 +1,7 @@
 # E2E guard: PortableTailscale must never require administrator privileges.
 #
 # Windows shows the "allow ... on private and public networks" firewall dialog
-# the moment a process listens on a non-loopback socket, and a standard user
+# when a process owns a non-loopback listening socket, and a standard user
 # cannot dismiss that dialog — only an administrator can. So this script
 # proves, against the freshly built exe:
 #
@@ -9,20 +9,27 @@
 #      highestAvailable anywhere in its bytes, which covers any embedded
 #      manifest),
 #   2. it starts and keeps running as a freshly created *standard* user,
-#      from a directory that user can execute (the runner workspace is not
+#      from a directory that user may execute (the runner workspace is not
 #      readable by arbitrary local users),
-#   3. for the whole audit window it never owns a non-loopback TCP listener,
-#      and never owns a non-loopback UDP socket that persists across three
-#      consecutive samples (a fleeting UDP socket is an outbound client such
-#      as a DNS query; those do not trigger the dialog, persistent ones do —
-#      the failure fires immediately on the third strike, not at the end),
+#   3. during the whole audit window it never owns a non-loopback socket of
+#      any kind: no non-loopback TCP listener, and no non-loopback UDP
+#      endpoint at all (zero tolerance — even a brief wildcard UDP bind can
+#      trigger the dialog). The expected UDP set is loopback-only (netcheck
+#      binds [::1]); the WireGuard and portmapper sockets this PR guards
+#      against are bound at tsnet engine start, before any login, so the
+#      pre-login audit window covers them (magicsock bindSocket runs at
+#      engine start; the portmapper socket is created during the endpoint
+#      determination that engine start triggers),
 #   4. the audit observed the process actually networking (an established
 #      outbound TCP connection is the Tailscale control/DERP path, so the
-#      tsnet engine really started) and at least one of its sockets, so a
-#      blind or wrong-process pass cannot fake success.
+#      engine really started) and observed at least one of its sockets, so
+#      a blind or wrong-process pass cannot fake success.
 #
 # Credentials for the throwaway local user are generated at random per run
-# and never leave memory; cleanup failures fail the run too.
+# and never leave memory. Socket sampling is strict: a failed query fails
+# the run, and only the cmdlets' benign "no matching objects" message is
+# treated as an empty set; cleanup failures are always reported and fail a
+# passing run.
 #
 # Run by .github/workflows/windows-build.yml after the build step.
 
@@ -33,6 +40,18 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# The NetTCPIP cmdlets report "no matching objects" as an error when the
+# filter matches nothing. Treat exactly that case as an empty result; any
+# other query failure must fail the audit rather than read as "clean".
+function Get-Sockets {
+    param([Parameter(Mandatory = $true)] [scriptblock] $Query)
+    try { @(& $Query) }
+    catch {
+        if ($_.FullyQualifiedErrorId -notlike 'NoMatching*' -and $_.Exception.Message -notmatch 'No matching .+ objects') { throw }
+        @()
+    }
+}
 
 $loopback = @('127.0.0.1', '::1')
 $srcExe = (Resolve-Path $ExePath).Path
@@ -99,8 +118,10 @@ try {
     }
     Write-Host "audit: watching PID $targetPid (user $user) for $Seconds s"
 
-    # 3. Sample the process's sockets for the whole audit window.
-    $udpStrikes = @{}
+    # 3. Sample the process's sockets for the whole audit window. The
+    # queries carry no error suppression: under $ErrorActionPreference =
+    # 'Stop' a failed query throws, while a process with no matching
+    # endpoints simply returns an empty set.
     $sawSocket = $false
     $sawOutbound = $false
     $deadline = (Get-Date).AddSeconds($Seconds)
@@ -109,30 +130,20 @@ try {
             $result = (Get-ScheduledTaskInfo -TaskName $taskName).LastTaskResult
             throw ("the exe exited early while running as {0} (LastTaskResult = 0x{1:X8})" -f $user, $result)
         }
-        # One strike per unique non-loopback UDP local address per sample.
-        $seen = @{}
-        foreach ($ep in @(Get-NetUDPEndpoint -OwningProcess $targetPid -ErrorAction SilentlyContinue)) {
+        foreach ($ep in Get-Sockets { Get-NetUDPEndpoint -OwningProcess $targetPid -ErrorAction Stop }) {
             $sawSocket = $true
-            $seen[$ep.LocalAddress] = $true
+            if ($loopback -notcontains $ep.LocalAddress) {
+                throw ("non-loopback UDP endpoint {0}:{1}; any non-loopback UDP socket can trigger the firewall dialog" -f $ep.LocalAddress, $ep.LocalPort)
+            }
         }
-        foreach ($tcp in @(Get-NetTCPConnection -OwningProcess $targetPid -State Listen -ErrorAction SilentlyContinue)) {
+        foreach ($tcp in Get-Sockets { Get-NetTCPConnection -OwningProcess $targetPid -State Listen -ErrorAction Stop }) {
             $sawSocket = $true
             if ($loopback -notcontains $tcp.LocalAddress) {
                 throw "non-loopback TCP listener $($tcp.LocalAddress):$($tcp.LocalPort)"
             }
         }
-        foreach ($conn in @(Get-NetTCPConnection -OwningProcess $targetPid -State Established -ErrorAction SilentlyContinue)) {
+        foreach ($conn in Get-Sockets { Get-NetTCPConnection -OwningProcess $targetPid -State Established -ErrorAction Stop }) {
             if ($loopback -notcontains $conn.RemoteAddress) { $sawOutbound = $true }
-        }
-        foreach ($addr in @($seen.Keys)) {
-            if ($loopback -contains $addr) { continue }
-            $udpStrikes[$addr] = 1 + [int]$udpStrikes[$addr]
-            if ($udpStrikes[$addr] -ge 3) {
-                throw ("persistent non-loopback UDP bind on {0} ({1} consecutive samples); this is what triggers the firewall dialog" -f $addr, $udpStrikes[$addr])
-            }
-        }
-        foreach ($addr in @($udpStrikes.Keys)) {
-            if (-not $seen.ContainsKey($addr)) { $udpStrikes.Remove($addr) }
         }
         Start-Sleep -Seconds $SampleSeconds
     }
@@ -158,7 +169,10 @@ finally {
     if (Test-Path $auditDir) {
         try { Remove-Item $auditDir -Recurse -Force -ErrorAction Stop } catch { $cleanupErrors += $_.Exception.Message }
     }
-    if ($cleanupErrors.Count -gt 0 -and -not $bodyFailed) {
-        throw ("cleanup failed (fail closed): " + ($cleanupErrors -join '; '))
+    if ($cleanupErrors.Count -gt 0) {
+        Write-Warning ("cleanup failed: " + ($cleanupErrors -join '; '))
+        if (-not $bodyFailed) {
+            throw 'cleanup failed on an otherwise passing run; failing closed'
+        }
     }
 }
