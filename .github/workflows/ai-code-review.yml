@@ -16,6 +16,10 @@ name: AI Code Review
 # - NO AUTO-MERGE: the socsdocs copy merges on this verdict because a full test
 #   suite gated it first. The windows build is this repo's only check, so the
 #   reviewers report and never merge.
+# - GATED ON THE BUILD: review jobs only run after the Windows Build's build
+#   job (vet, tests, the no-admin e2e, smoke test) succeeded for this head
+#   SHA, so model time and verdicts are never spent on code that does not
+#   even build. A failed or missing build skips both reviews.
 on:
   pull_request_target:
     types: [opened, synchronize, reopened]
@@ -28,11 +32,67 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  build-gate:
+    name: Build Gate (reviews wait for the build)
+    # Same trust filter as the reviewers: a first-time fork pr never produces
+    # a build check on this sha, so polling for one would only burn 23
+    # minutes of runner time before skipping anyway.
+    if: contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'), github.event.pull_request.author_association)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: read
+    timeout-minutes: 25
+    outputs:
+      build: ${{ steps.wait.outputs.conclusion }}
+    steps:
+      - name: Wait for the Windows build to finish
+        id: wait
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          # Pull-request runs attach their check runs to the merge commit,
+          # push runs to the branch head; accept whichever completes first.
+          SHA: ${{ github.event.pull_request.head.sha }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          set -euo pipefail
+          # Poll until the Windows Build workflow's "build" job (the one that
+          # vets, tests, runs the e2e, and smokes) reports a conclusion.
+          deadline=$(( $(date +%s) + 1380 ))
+          while :; do
+            conclusion=""
+            for sha in "$SHA" "$MERGE_SHA"; do
+              [ -n "$sha" ] || continue
+              pair=$(gh api "repos/$REPO/commits/$sha/check-runs" \
+                --jq '.check_runs[] | select(.name == "build") | .status + "=" + (.conclusion // "")' \
+                | head -n 1 || true)
+              if [ "${pair%%=*}" = "completed" ] && [ -n "${pair#*=}" ]; then
+                conclusion=${pair#*=}
+                break
+              fi
+            done
+            if [ -n "$conclusion" ]; then
+              break
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              # No build result in time (never started or stuck): treat as not
+              # successful so the reviews skip instead of reviewing unverified code.
+              conclusion=timeout
+              break
+            fi
+            sleep 30
+          done
+          echo "conclusion=$conclusion" >> "$GITHUB_OUTPUT"
+          echo "windows build conclusion for $SHA: $conclusion"
+
   code-review:
     name: AI Code Review Agent
     # A first-time fork pr gets no review: the key is spendable and the diff is
     # the only thing a stranger can send. Contributors with a merged pr do.
-    if: contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'), github.event.pull_request.author_association)
+    # The build gate must have seen the Windows build succeed first.
+    needs: build-gate
+    if: needs.build-gate.outputs.build == 'success' && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'), github.event.pull_request.author_association)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -136,7 +196,8 @@ jobs:
 
   security-review:
     name: AI Security Review Agent
-    if: contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'), github.event.pull_request.author_association)
+    needs: build-gate
+    if: needs.build-gate.outputs.build == 'success' && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'), github.event.pull_request.author_association)
     runs-on: ubuntu-latest
     permissions:
       contents: read

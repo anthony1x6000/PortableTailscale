@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"syscall"
@@ -32,9 +33,24 @@ import (
 
 var authURLPattern = regexp.MustCompile(`https://login\.tailscale\.com/a/[A-Za-z0-9_-]+`)
 
-// version is stamped at build time (-X portabletailscale/cmd/portabletailscale.version)
-// so a running window always shows which build produced its behaviour.
-var version = "dev"
+// buildVersion identifies the exact build from the VCS information the Go
+// toolchain embeds in every binary (it survives -trimpath and symbol
+// stripping). The classic -ldflags -X stamping silently stopped working with
+// this toolchain, and buildinfo needs no build flags at all; outside a git
+// checkout it falls back to "dev".
+func buildVersion() string {
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		for _, s := range bi.Settings {
+			if s.Key == "vcs.revision" {
+				if len(s.Value) >= 7 {
+					return s.Value[:7]
+				}
+				return s.Value
+			}
+		}
+	}
+	return "dev"
+}
 
 type options struct {
 	hostname       string
@@ -43,6 +59,8 @@ type options struct {
 	install        bool
 	uninstall      bool
 	stdio          bool
+	version        bool
+	controlURL     string
 	deprecatedDir  string
 }
 
@@ -128,6 +146,9 @@ func main() {
 		os.Exit(2)
 	}
 	switch {
+	case opts.version:
+		fmt.Println(buildVersion())
+		os.Exit(0)
 	case opts.uninstall:
 		os.Exit(uninstall())
 	case opts.stdio:
@@ -139,7 +160,7 @@ func main() {
 
 func run(opts options) int {
 	report := &reporter{json: opts.json, color: !opts.json && enableColor()}
-	report.emit(event{Event: "starting", Version: version})
+	report.emit(event{Event: "starting", Version: buildVersion()})
 
 	cleanupStaleRuntimeDirs(os.TempDir(), runtimeDirMaxAge, time.Now())
 	runtimeDir, err := os.MkdirTemp("", runtimeDirPrefix)
@@ -185,12 +206,13 @@ func run(opts options) int {
 	avoidWindowsFirewallPrompt(runtime.GOOS)
 
 	srv := &tsnet.Server{
-		Dir:       runtimeDir,
-		Store:     stateStore,
-		Hostname:  opts.hostname,
-		Ephemeral: true,
-		UserLogf:  userLogf,
-		Logf:      logger.Discard,
+		Dir:        runtimeDir,
+		Store:      stateStore,
+		Hostname:   opts.hostname,
+		Ephemeral:  true,
+		ControlURL: opts.controlURL,
+		UserLogf:   userLogf,
+		Logf:       logger.Discard,
 	}
 
 	dataDir, dataErr := executableDataDir()
@@ -198,10 +220,16 @@ func run(opts options) int {
 	// points at a dead port, makes tailscale's control client log winhttp
 	// "unable to download script" errors, and would send browsers through a
 	// dead proxy if this run never reaches sign-in. A fresh PAC is set after
-	// connecting (installBrowserPAC / reactivateBrowserPAC). Without a saved
-	// backup this is a no-op.
+	// connecting (installBrowserPAC / reactivateBrowserPAC).
 	if dataErr == nil {
 		_ = deactivateBrowserPAC(dataDir)
+	}
+	// A PAC can also be orphaned by an install from a different directory,
+	// whose backup this executable cannot see; clear that too. Only with a
+	// usable data directory: without one there is no way to tell a restorable
+	// PAC from an orphan.
+	if dataErr == nil {
+		_ = clearOrphanPAC(dataDir)
 	}
 	sshPath, sshErr := sshConfigPath()
 	needHTTPProxy := opts.install ||
@@ -310,10 +338,35 @@ func run(opts options) int {
 		connected.PACURL = pacURL
 	}
 	report.emit(connected)
+	// Short, copy-pasteable ways in, shown right after authentication.
+	exampleHost := "machine-name"
+	if len(peers.Names) > 0 {
+		exampleHost = peers.Names[0]
+	}
+	// socks5h:// makes clients resolve the name through the proxy (tailnet
+	// MagicDNS), not through the local system resolver where it does not exist.
+	report.emit(event{Event: "message", Message: usageExamples(needHTTPProxy, strings.Replace(proxyURL, "socks5://", "socks5h://", 1), exampleHost)})
 
 	<-ctx.Done()
 	report.emit(event{Event: "stopping"})
 	return 0
+}
+
+// usageExamples renders the post-login cheat sheet: a few short lines with
+// real values (the SOCKS URL and a peer name from the tailnet map) so they
+// can be copied straight into a browser or terminal.
+func usageExamples(httpProxy bool, socksURL, host string) string {
+	var b strings.Builder
+	b.WriteString("How to reach your tailnet (replace PORT with your service's port):\n")
+	if httpProxy {
+		b.WriteString("  browser:  open http://" + host + ":PORT/ in Edge or Chrome (restart the browser once after the first install)\n")
+		b.WriteString("  terminal: curl.exe -x http://127.0.0.1:41112 http://" + host + ":PORT/\n")
+		b.WriteString("  ssh:      ssh " + host + "\n")
+	} else {
+		b.WriteString("  browser/ssh need a one-time setup: run once with --install, then restart this program and your browser\n")
+	}
+	b.WriteString("  socks5:   curl.exe -x " + socksURL + " http://" + host + ":PORT/")
+	return b.String()
 }
 
 // avoidWindowsFirewallPrompt keeps every socket in the embedded Tailscale node
@@ -403,17 +456,39 @@ func parseOptions() (options, error) {
 	flag.BoolVar(&opts.noBrowser, "no-browser", false, "print the authentication URL without opening it")
 	flag.BoolVar(&opts.install, "install", false, "install the browser PAC and SSH config, then run")
 	flag.BoolVar(&opts.uninstall, "uninstall", false, "remove the browser PAC and SSH config, then exit")
+	flag.StringVar(&opts.controlURL, "control-url", "", "internal: alternate control server URL (used by e2e tests)")
 	flag.BoolVar(&opts.stdio, "stdio", false, "internal: tunnel stdin/stdout to HOST PORT")
+	flag.BoolVar(&opts.version, "version", false, "print the build version and exit")
 	flag.StringVar(&opts.deprecatedDir, "state-dir", "", "deprecated: ignored; no identity is persisted")
 	flag.Parse()
 
 	if opts.install && opts.uninstall {
 		return options{}, errors.New("--install and --uninstall are mutually exclusive")
 	}
+	if opts.controlURL != "" {
+		var err error
+		if opts.controlURL, err = parseControlURL(opts.controlURL); err != nil {
+			return options{}, err
+		}
+	}
 	if opts.deprecatedDir != "" {
 		fmt.Fprintln(os.Stderr, "warning: --state-dir is ignored; PortableTailscale no longer persists an identity")
 	}
 	return opts, nil
+}
+
+// parseControlURL accepts only loopback control servers. The flag exists for
+// the e2e harness's local fake control; a remote value would let a launcher
+// redirect this node's login at a server it does not control.
+func parseControlURL(raw string) (string, error) {
+	host := ""
+	if u, err := url.Parse(raw); err == nil {
+		host = u.Hostname()
+	}
+	if host != "localhost" && host != "127.0.0.1" && host != "::1" {
+		return "", fmt.Errorf("--control-url: only loopback control servers are supported (got host %q)", host)
+	}
+	return raw, nil
 }
 
 func executableDirectory() (string, error) {

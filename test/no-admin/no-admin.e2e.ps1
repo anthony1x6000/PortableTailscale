@@ -1,46 +1,47 @@
-# E2E guard: PortableTailscale must never require administrator privileges,
-# on Windows, from startup through the post-login data path.
+# E2E guard: PortableTailscale must never require administrator privileges on
+# Windows, and must actually work — headless login, connected state, and a
+# proxied fetch of a tailnet URL — as a standard user, with no secrets.
 #
-# Windows shows the "allow ... on private and public networks" firewall dialog
-# when a process owns a non-loopback listening socket, and a standard user
-# cannot dismiss that dialog — only an administrator can. This script proves,
-# against the freshly built exe:
+# A private Tailscale world runs on loopback (test/harness): a fake control
+# server that accepts any auth key, a DERP server, and a peer node serving a
+# known payload over its tailnet address. The freshly built exe is driven
+# through the real user flow against it:
 #
-#   1. the exe does not request UAC elevation (no requireAdministrator or
+#   1. the exe must not request UAC elevation (no requireAdministrator or
 #      highestAvailable anywhere in its bytes, covering any embedded manifest),
 #   2. it runs as a freshly created *standard* user, from a directory that
 #      user may write (the runner workspace is not readable by arbitrary
-#      local users), and keeps running for the whole audit window,
-#   3. it never owns a non-loopback socket in any sample: no non-loopback TCP
-#      listener and no non-loopback UDP endpoint at all — a single sighting
-#      fails the run. The guarded sockets — magicsock's WireGuard UDP, the
-#      UPnP portmapper, and any DNS-forwarder UDP — are bound from engine
-#      start onward and live for the process lifetime, well above the sample
-#      interval; sub-second binds cannot be excluded by sampling, and the
-#      README documents the one remaining known path (upstream DNS via
-#      SOCKS5 to non-tailnet names),
-#   4. it actually progresses: the log must show the sign-in URL event (or,
-#      when the TS_AUTHKEY secret is provided on a trusted ref, the
-#      connected event plus observed loopback listeners and an outbound
-#      control/DERP connection), so a blind or wrong-process pass cannot
-#      fake success.
+#      local users), with a writable TEMP (CreateProcessWithLogonW inherits
+#      the parent's, which points at the runner admin's profile),
+#   3. from launch through connected state it never owns a non-loopback
+#      socket in any sample: no non-loopback TCP listener and no non-loopback
+#      UDP endpoint at all — a single sighting fails the run. The guarded
+#      sockets (magicsock's WireGuard UDP, the UPnP portmapper, upstream DNS)
+#      are bound from engine start onward and live for the process lifetime,
+#      well above the sample interval; sub-second binds cannot be excluded by
+#      sampling, and the README documents the one remaining known path,
+#   4. it reaches the connected event (login completes headlessly), binds
+#      the loopback HTTP proxy on 127.0.0.1:41112, and curl through that
+#      proxy fetches the harness peer's payload by short name and by FQDN —
+#      the exact user-facing acceptance criteria.
 #
-# The exe runs without --install so the fixed loopback proxy port is not
-# involved: runner images can have WinNAT/Hyper-V excluded port ranges that
-# make binding one specific port fail, which says nothing about admin rights.
-# Its --json output is captured through a cmd wrapper (Start-Process cannot
-# combine -Credential with output redirection) and parsed for the events.
+# The exe runs with --install so the loopback proxy and PAC flow execute;
+# the fixed port 41112 is only bound on loopback, where runner port
+# exclusions do not apply. Its --json output is captured through a cmd
+# wrapper (Start-Process cannot combine -Credential with redirection).
 #
 # Socket queries run unfiltered and are filtered client-side by owning PID:
-# the NetTCPIP cmdlets report a no-match filter as an error, which would turn
-# an empty sample into a false failure; client-side filtering makes an empty
-# sample an empty set while a real query failure still throws.
+# the NetTCPIP cmdlets report a no-match filter as an error, which would
+# turn an empty sample into a false failure; client-side filtering makes an
+# empty sample an empty set while a real query failure still throws.
 #
 # Run by .github/workflows/windows-build.yml after the build step.
 
 param(
     [Parameter(Mandatory = $true)] [string] $ExePath,
-    [int] $Seconds = 60,
+    [Parameter(Mandatory = $true)] [string] $HarnessPath,
+    [int] $LoginTimeoutSeconds = 120,
+    [int] $PostConnectSeconds = 20,
     [int] $SampleSeconds = 1
 )
 
@@ -48,12 +49,14 @@ $ErrorActionPreference = 'Stop'
 
 $loopback = @('127.0.0.1', '::1')
 $srcExe = (Resolve-Path $ExePath).Path
+$srcHarness = (Resolve-Path $HarnessPath).Path
 # Root of the system drive, not a user profile tree: profile ACLs do not
 # necessarily allow other local users even with an explicit grant.
 $auditDir = 'C:\pt-no-admin-e2e'
 $auditExe = Join-Path $auditDir 'PortableTailscale.exe'
+$auditHarness = Join-Path $auditDir 'pt-e2e-harness.exe'
 $outLog = Join-Path $auditDir 'out.log'
-$haveAuthKey = -not [string]::IsNullOrEmpty($env:TS_AUTHKEY)
+$harnessLog = Join-Path $auditDir 'harness.log'
 
 # Random per-run throwaway account; the password meets complexity rules by
 # construction (base64 payload + explicit upper/lower/digit/special tail).
@@ -63,6 +66,7 @@ $suffix = ([Convert]::ToBase64String($random) -replace '[^a-zA-Z0-9]', '').Subst
 $user = "pt_e2e_$suffix"
 [System.Security.Cryptography.RandomNumberGenerator]::Fill($random)
 $password = [Convert]::ToBase64String($random) + '!aA1'
+$harnessProc = $null
 $cmdProc = $null
 $targetPid = $null
 $bodyFailed = $false
@@ -101,6 +105,25 @@ function ConvertTo-SafeEvents {
     return ((($Events.Keys | Sort-Object) -join ',') -replace '(?i)\b[a-z][a-z0-9+.\-]*://\S+', '[url]') -replace 'tskey-\S+', '[authkey]'
 }
 
+function Assert-AuditSample {
+    # One socket sample for the audited PID: every UDP endpoint and every
+    # TCP listener must be loopback. Outbound connections (to the loopback
+    # fake control/DERP world) are not direction-restricted; the connected
+    # event and the proxied fetch prove the node actually networks.
+    foreach ($ep in @(Get-NetUDPEndpoint | Where-Object { $_.OwningProcess -eq $script:targetPid })) {
+        $script:sawSocket = $true
+        if ($loopback -notcontains $ep.LocalAddress) {
+            throw ("non-loopback UDP endpoint {0}:{1}; any non-loopback UDP socket can trigger the firewall dialog" -f $ep.LocalAddress, $ep.LocalPort)
+        }
+    }
+    foreach ($tcp in @(Get-NetTCPConnection | Where-Object { $_.OwningProcess -eq $script:targetPid -and $_.State -eq 'Listen' })) {
+        $script:sawSocket = $true
+        if ($loopback -notcontains $tcp.LocalAddress) {
+            throw "non-loopback TCP listener $($tcp.LocalAddress):$($tcp.LocalPort)"
+        }
+    }
+}
+
 try {
     # 1. The image must not ask Windows to elevate it.
     $bytes = [System.IO.File]::ReadAllBytes($srcExe)
@@ -112,22 +135,40 @@ try {
         }
     }
 
-    # 2. Run the exe as a throwaway standard user.
+    # 2. Stage everything and prepare the standard user.
     $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
     New-LocalUser -Name $user -Password $securePassword -Description 'PortableTailscale no-admin e2e' | Out-Null
 
     if (Test-Path $auditDir) { Remove-Item $auditDir -Recurse -Force }
     New-Item -ItemType Directory -Path $auditDir | Out-Null
     Copy-Item $srcExe $auditExe
+    Copy-Item $srcHarness $auditHarness
     icacls $auditDir /grant "${user}:(OI)(CI)M" /T | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "icacls grant for $user failed with exit code $LASTEXITCODE" }
-    # The child inherits the parent step's TEMP/TMP (the runner admin's
-    # profile), which the standard user cannot write — os.MkdirTemp dies with
-    # "Access is denied". Point the environment at directories the standard
-    # user owns instead.
     $tmpDir = Join-Path $auditDir 'tmp'
-    $profileDir = "C:\Users\$user"
     New-Item -ItemType Directory -Path $tmpDir | Out-Null
+
+    # The harness (fake control + DERP + peer) runs as the runner user on
+    # loopback; the exe as the standard user reaches it over loopback.
+    $harnessProc = Start-Process -FilePath $auditHarness -WorkingDirectory $auditDir -WindowStyle Hidden -RedirectStandardOutput $harnessLog -RedirectStandardError (Join-Path $auditDir 'harness.err') -PassThru
+    $world = @{}
+    $deadline = (Get-Date).AddSeconds(60)
+    while (-not $world.ContainsKey('ready') -and (Get-Date) -lt $deadline) {
+        if (Test-Path $harnessLog) {
+            foreach ($line in @(Get-Content $harnessLog -ErrorAction SilentlyContinue)) {
+                $k, $v = $line -split '=', 2
+                if ($k -and $v) { $world[$k] = $v }
+                elseif ($k) { $world[$k] = $true } # bare marker such as "ready"
+            }
+        }
+        if (-not $world.ContainsKey('ready')) { Start-Sleep -Milliseconds 500 }
+    }
+    if (-not $world.ContainsKey('ready')) {
+        $detail = (Get-Content $harnessLog -Raw -ErrorAction SilentlyContinue)
+        $errDetail = (Get-Content (Join-Path $auditDir 'harness.err') -Raw -ErrorAction SilentlyContinue)
+        throw "the e2e harness never became ready; output: $detail; stderr: $errDetail"
+    }
+    Write-Host "audit: harness world ready (control $($world['control']), peer $($world['peer-short']) / $($world['peer-fqdn']))"
 
     Get-Process -Name 'PortableTailscale' -ErrorAction SilentlyContinue |
         Stop-Process -Force -ErrorAction SilentlyContinue
@@ -135,9 +176,12 @@ try {
     # Start-Process -Credential (CreateProcessWithLogonW) cannot redirect
     # itself. Paths have no spaces, so the command line stays quote-free —
     # PowerShell 7.3+ re-quotes ArgumentList elements that contain quotes
-    # and hands cmd mangled input. cmd stays alive as the exe's parent while
-    # the exe runs.
-    $cmdLine = 'set TMP={0}& set TEMP={0}& set USERPROFILE={1}& {2} --no-browser --json > {3} 2>&1' -f $tmpDir, $profileDir, $auditExe, $outLog
+    # and hands cmd mangled input. The child inherits the parent step's
+    # TEMP/TMP (the runner admin's profile), which the standard user cannot
+    # write, so the environment points at directories it owns. TS_AUTHKEY
+    # carries a fake key for the local test control server; there is no
+    # secret anywhere.
+    $cmdLine = 'set TS_AUTHKEY=e2e-key& set TMP={0}& set TEMP={0}& set USERPROFILE=C:\Users\{1}& {2} --install --no-browser --json --control-url {3} > {4} 2>&1' -f $tmpDir, $user, $auditExe, $world['control'], $outLog
     $credential = New-Object System.Management.Automation.PSCredential($user, $securePassword)
     $cmdProc = Start-Process -FilePath "$env:ComSpec" -ArgumentList "/c $cmdLine" -WorkingDirectory $auditDir -Credential $credential -LoadUserProfile -WindowStyle Hidden -PassThru
     $cmdPid = $cmdProc.Id
@@ -157,61 +201,61 @@ try {
     if (-not $owner -or $owner.User -ne $user) {
         throw "the audited process is owned by '$($owner.User)', not by the standard user '$user'"
     }
-    Write-Host "audit: watching PID $targetPid (user $user) for $Seconds s (auth key: $haveAuthKey)"
+    Write-Host "audit: watching PID $targetPid (user $user)"
 
-    # 3. Sample the process's sockets for the whole audit window. Before
-    # login the process owns no persistent sockets by design: tsnet's
-    # listeners (local API, SOCKS5) only appear after sign-in, and the
-    # control connection has retry gaps. Liveness is instead proven by the
-    # exe's own events plus the identity-checked process surviving; the
-    # guarded sockets (magicsock UDP, portmapper UDP), if a regression
-    # reintroduces them, are bound from engine start and persist, so any
-    # sample catches them.
+    # 3. Audit from launch through the login timeout: every sample must be
+    # clean, and the connected event must arrive (headless login against the
+    # fake control).
     $sawSocket = $false
-    $sawOutbound = $false
-    $deadline = (Get-Date).AddSeconds($Seconds)
-    while ((Get-Date) -lt $deadline) {
+    $sawConnected = $false
+    $deadline = (Get-Date).AddSeconds($LoginTimeoutSeconds)
+    while (-not $sawConnected -and (Get-Date) -lt $deadline) {
         $alive = Get-Process -Id $targetPid -ErrorAction SilentlyContinue
         if (-not $alive -or $alive.Name -ne 'PortableTailscale') {
             throw ("the exe exited early (or its PID was reused) while running as $user; output: {0}" -f (Get-LogDetail))
         }
-        foreach ($ep in @(Get-NetUDPEndpoint | Where-Object { $_.OwningProcess -eq $targetPid })) {
-            $sawSocket = $true
-            if ($loopback -notcontains $ep.LocalAddress) {
-                throw ("non-loopback UDP endpoint {0}:{1}; any non-loopback UDP socket can trigger the firewall dialog" -f $ep.LocalAddress, $ep.LocalPort)
-            }
-        }
-        foreach ($tcp in @(Get-NetTCPConnection | Where-Object { $_.OwningProcess -eq $targetPid -and $_.State -eq 'Listen' })) {
-            $sawSocket = $true
-            if ($loopback -notcontains $tcp.LocalAddress) {
-                throw "non-loopback TCP listener $($tcp.LocalAddress):$($tcp.LocalPort)"
-            }
-        }
-        foreach ($conn in @(Get-NetTCPConnection | Where-Object { $_.OwningProcess -eq $targetPid -and $_.State -eq 'Established' })) {
-            if ($loopback -notcontains $conn.RemoteAddress) { $sawOutbound = $true }
-        }
+        Assert-AuditSample
+        if ((Read-Events).ContainsKey('connected')) { $sawConnected = $true }
+        else { Start-Sleep -Seconds $SampleSeconds }
+    }
+    if (-not $sawConnected) {
+        throw ("the exe never reached the connected state (events seen: {0}); netstat: {1}; output tail: {2}" -f (ConvertTo-SafeEvents (Read-Events)), ((netstat.exe -ano | Select-String $targetPid) -join ' | '), ((Get-LogDetail) -split "`n" | Select-Object -Last 5))
+    }
+    Write-Host 'audit: connected reached; auditing the post-login window'
+
+    # 4. Post-login audit window.
+    $deadline = (Get-Date).AddSeconds($PostConnectSeconds)
+    while ((Get-Date) -lt $deadline) {
+        Assert-AuditSample
         Start-Sleep -Seconds $SampleSeconds
     }
+    if (-not $sawSocket) {
+        throw "connected but no socket of the process was ever observed; the audit was not watching the right process. netstat: $((netstat.exe -ano | Select-String $targetPid) -join ' | ')"
+    }
 
-    # 4. The node must have reached sign-in — or, with an auth key on a
-    # trusted ref, fully connected, in which case its loopback listeners
-    # and the outbound control/DERP path must also have been observed.
-    $events = Read-Events
-    if ($haveAuthKey) {
-        if (-not $events.ContainsKey('connected')) {
-            throw ("TS_AUTHKEY was provided but the exe never reached the connected state; events seen: {0}; sockets seen: {1}; netstat: {2}; output tail: {3}" -f (ConvertTo-SafeEvents $events), $sawSocket, ((netstat.exe -ano | Select-String $targetPid) -join ' | '), ((Get-LogDetail) -split "`n" | Select-Object -Last 5))
+    # 5. The user-facing promise: a tailnet URL through the loopback proxy,
+    # fetched AS the same standard user that runs the exe (the browser that
+    # would use the PAC belongs to that user too).
+    $fetchIndex = 0
+    foreach ($hostName in @($world['peer-short'], $world['peer-fqdn'])) {
+        $fetchIndex++
+        $url = 'http://{0}:{1}/' -f $hostName, $world['peer-port']
+        $fetchLog = Join-Path $auditDir ("fetch-{0}.log" -f $fetchIndex)
+        # Same launch shape as the exe: curl under cmd as the standard user,
+        # output redirected to a file, quote-free command line.
+        $fetchLine = 'curl.exe -s --max-time 30 -x http://127.0.0.1:41112 {0} > {1} 2>&1' -f $url, $fetchLog
+        $fetchProc = Start-Process -FilePath "$env:ComSpec" -ArgumentList "/c $fetchLine" -WorkingDirectory $auditDir -Credential $credential -LoadUserProfile -WindowStyle Hidden -PassThru
+        if (-not $fetchProc.WaitForExit(60000)) {
+            Stop-Process -Id $fetchProc.Id -Force -ErrorAction SilentlyContinue
+            throw "fetch through the loopback proxy timed out for $url"
         }
-        if (-not $sawSocket) {
-            throw 'connected but no socket of the process was ever observed; the audit was not watching the right process'
+        $body = if (Test-Path $fetchLog) { (Get-Content $fetchLog -Raw) } else { '' }
+        if ($fetchProc.ExitCode -ne 0 -or "$body".Trim() -ne $world['payload']) {
+            throw ("fetch through the loopback proxy failed for {0} (exit {1}, body '{2}'); output tail: {3}" -f $url, $fetchProc.ExitCode, $body, ((Get-LogDetail) -split "`n" | Select-Object -Last 5))
         }
-        if (-not $sawOutbound) {
-            throw 'connected but no outbound connection was observed; the control/DERP path never ran'
-        }
+        Write-Host "audit: proxied fetch as $user OK: $url"
     }
-    elseif (-not $events.ContainsKey('auth')) {
-        throw ("the exe never printed a sign-in URL (events seen: {0}); netstat: {1}; output tail: {2}" -f (ConvertTo-SafeEvents $events), ((netstat.exe -ano | Select-String $targetPid) -join ' | '), ((Get-LogDetail) -split "`n" | Select-Object -Last 5))
-    }
-    Write-Host 'audit: PASS — no elevation requested, no non-loopback binds as a standard user'
+    Write-Host 'audit: PASS — standard user, no elevation, no non-loopback binds, tailnet URL served through the proxy'
 }
 catch {
     $bodyFailed = $true
@@ -227,6 +271,9 @@ finally {
         if (-not $cmdProc.HasExited) {
             try { Stop-Process -Id $cmdProc.Id -Force -ErrorAction Stop } catch { $cleanupErrors += $_.Exception.Message }
         }
+    }
+    if ($harnessProc -and -not $harnessProc.HasExited) {
+        try { Stop-Process -Id $harnessProc.Id -Force -ErrorAction Stop } catch { $cleanupErrors += $_.Exception.Message }
     }
     try { Remove-LocalUser -Name $user -ErrorAction Stop } catch { $cleanupErrors += $_.Exception.Message }
     if (Test-Path $auditDir) {

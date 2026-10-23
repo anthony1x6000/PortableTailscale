@@ -27,6 +27,14 @@ jobs:
         with:
           node-version: "22"
 
+      # tailscale v1.102.5 binds a 0.0.0.0 peerapi listener on userspace
+      # (netstack) builds, which triggers the Windows firewall dialog for
+      # standard users. Patch the module in the (cold) cache before anything
+      # compiles; the script fails loudly if upstream code drifts.
+      - name: Patch tsnet peerapi (loopback-only userspace listener)
+        shell: pwsh
+        run: ./scripts/patch-tsnet-peerapi.ps1
+
       - name: Vet
         run: go vet ./...
 
@@ -37,23 +45,24 @@ jobs:
 
       - name: Build
         run: |
-          $ver = if ("${env:GITHUB_REF_TYPE}" -eq "tag") { "${env:GITHUB_REF_NAME}" } else { ${env:GITHUB_SHA}.Substring(0, 7) }
-          go build -tags=ts_omit_logtail -trimpath -ldflags="-s -w -X portabletailscale/cmd/portabletailscale.version=$ver" -o PortableTailscale.exe ./cmd/portabletailscale
+          # The exe reports its version from the VCS data the toolchain
+          # embeds (see buildVersion); no ldflags stamping is involved.
+          go build -tags=ts_omit_logtail -trimpath -ldflags="-s -w" -o PortableTailscale.exe ./cmd/portabletailscale
           go build -trimpath -ldflags="-s -w" -o PortableTailscaleRDP.exe ./cmd/tui
+          go build -trimpath -ldflags="-s -w" -o pt-e2e-harness.exe ./test/harness
+          $sha = ${env:GITHUB_SHA}.Substring(0, 7)
+          $stamp = (& .\PortableTailscale.exe --version).Trim()
+          if ($stamp -ne $sha) { throw "version stamp mismatch: exe reports '$stamp', expected '$sha'" }
+          Write-Host "version stamp OK: $stamp"
 
       # Runs PR-modifiable code with runner-level rights (local account,
       # process creation). Safe only because windows-latest is an ephemeral
       # GitHub-hosted runner; do not move this job to self-hosted runners or
-      # pull_request_target.
+      # pull_request_target. The login is against a local fake control
+      # server (test/harness); no secrets are involved.
       - name: No-admin e2e test
         shell: pwsh
-        env:
-          # An ephemeral Tailscale auth key lets the audit cover the
-          # post-login data path (where the firewall prompt used to appear).
-          # main only: any other ref (branches, tags on unmerged commits)
-          # runs PR-modifiable code and never sees the secret.
-          TS_AUTHKEY: ${{ github.ref == 'refs/heads/main' && secrets.TS_AUTHKEY || '' }}
-        run: ./test/no-admin/no-admin.e2e.ps1 -ExePath ./PortableTailscale.exe -Seconds 60
+        run: ./test/no-admin/no-admin.e2e.ps1 -ExePath ./PortableTailscale.exe -HarnessPath ./pt-e2e-harness.exe
 
       - name: Smoke test
         run: .\PortableTailscaleRDP.exe --smoke-test

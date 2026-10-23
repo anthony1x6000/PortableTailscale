@@ -20,6 +20,10 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
+      # Same patch as the Windows build: tsnet v1.102.5 binds a 0.0.0.0
+      # peerapi listener on userspace (netstack) builds. Fails loudly if
+      # upstream code drifts.
+      - run: ./scripts/patch-tsnet-peerapi.sh
       # cmd/tui is Windows-only, so this job covers the main binary; the
       # Windows workflow runs ./... for everything.
       - run: go vet ./cmd/portabletailscale
@@ -46,4 +50,6 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y xvfb
       - run: npx playwright install --with-deps chromium
         working-directory: test
+      # Same patch as the Windows build (see test-linux for the why).
+      - run: ./scripts/patch-tsnet-peerapi.sh
       - run: BROWSER_TEST=1 REQUIRE_NODE=1 xvfb-run -a go test -run TestChromiumBrowser -v ./cmd/portabletailscale
