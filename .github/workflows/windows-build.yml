@@ -27,6 +27,14 @@ jobs:
         with:
           node-version: "22"
 
+      # tailscale v1.102.5 binds a 0.0.0.0 peerapi listener on userspace
+      # (netstack) builds, which triggers the Windows firewall dialog for
+      # standard users. Patch the module in the (cold) cache before anything
+      # compiles; the script fails loudly if upstream code drifts.
+      - name: Patch tsnet peerapi (loopback-only userspace listener)
+        shell: pwsh
+        run: ./scripts/patch-tsnet-peerapi.ps1
+
       - name: Vet
         run: go vet ./...
 

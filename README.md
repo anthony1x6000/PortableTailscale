@@ -111,7 +111,11 @@ adapter, change system DNS, or require administrator rights.
   firewall dialog, which a standard user cannot dismiss, so on Windows the
   Tailscale node gives up its direct UDP paths: all tailnet traffic is relayed
   through Tailscale's DERP servers and never uses LAN-direct connections. This
-  is the price of running with no administrator rights at all.
+  is the price of running with no administrator rights at all. It also needs a
+  one-line patch to the pinned tsnet version (its userspace peerapi listener
+  binds `0.0.0.0`), applied automatically in CI by
+  `scripts/patch-tsnet-peerapi.ps1` / `.sh` — **run that script once before
+  building outside CI**, or the firewall dialog returns.
 - **Covered:** Chromium browsers using the system proxy, SSH/SCP/SFTP through the
   managed `ProxyCommand`, and any app you point at the loopback HTTP proxy, e.g.
   `curl -x http://127.0.0.1:41112 http://magicdns-name:8080/`.
