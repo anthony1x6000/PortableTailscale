@@ -107,8 +107,9 @@ function ConvertTo-SafeEvents {
 
 function Assert-AuditSample {
     # One socket sample for the audited PID: every UDP endpoint and every
-    # TCP listener must be loopback; tracks whether any socket and any
-    # outbound connection were ever seen.
+    # TCP listener must be loopback. Outbound connections (to the loopback
+    # fake control/DERP world) are not direction-restricted; the connected
+    # event and the proxied fetch prove the node actually networks.
     foreach ($ep in @(Get-NetUDPEndpoint | Where-Object { $_.OwningProcess -eq $script:targetPid })) {
         $script:sawSocket = $true
         if ($loopback -notcontains $ep.LocalAddress) {
@@ -120,9 +121,6 @@ function Assert-AuditSample {
         if ($loopback -notcontains $tcp.LocalAddress) {
             throw "non-loopback TCP listener $($tcp.LocalAddress):$($tcp.LocalPort)"
         }
-    }
-    foreach ($conn in @(Get-NetTCPConnection | Where-Object { $_.OwningProcess -eq $script:targetPid -and $_.State -eq 'Established' })) {
-        if ($loopback -notcontains $conn.RemoteAddress) { $script:sawOutbound = $true }
     }
 }
 
@@ -160,12 +158,15 @@ try {
             foreach ($line in @(Get-Content $harnessLog -ErrorAction SilentlyContinue)) {
                 $k, $v = $line -split '=', 2
                 if ($k -and $v) { $world[$k] = $v }
+                elseif ($k) { $world[$k] = $true } # bare marker such as "ready"
             }
         }
         if (-not $world.ContainsKey('ready')) { Start-Sleep -Milliseconds 500 }
     }
     if (-not $world.ContainsKey('ready')) {
-        throw "the e2e harness never became ready; harness output: $((Get-Content $harnessLog -Raw -ErrorAction SilentlyContinue))"
+        $detail = (Get-Content $harnessLog -Raw -ErrorAction SilentlyContinue)
+        $errDetail = (Get-Content (Join-Path $auditDir 'harness.err') -Raw -ErrorAction SilentlyContinue)
+        throw "the e2e harness never became ready; output: $detail; stderr: $errDetail"
     }
     Write-Host "audit: harness world ready (control $($world['control']), peer $($world['peer-short']) / $($world['peer-fqdn']))"
 
@@ -206,7 +207,6 @@ try {
     # clean, and the connected event must arrive (headless login against the
     # fake control).
     $sawSocket = $false
-    $sawOutbound = $false
     $sawConnected = $false
     $deadline = (Get-Date).AddSeconds($LoginTimeoutSeconds)
     while (-not $sawConnected -and (Get-Date) -lt $deadline) {
@@ -232,18 +232,28 @@ try {
     if (-not $sawSocket) {
         throw "connected but no socket of the process was ever observed; the audit was not watching the right process. netstat: $((netstat.exe -ano | Select-String $targetPid) -join ' | ')"
     }
-    if (-not $sawOutbound) {
-        throw 'connected but no outbound connection was observed; the control/DERP path never ran'
-    }
 
-    # 5. The user-facing promise: a tailnet URL through the loopback proxy.
+    # 5. The user-facing promise: a tailnet URL through the loopback proxy,
+    # fetched AS the same standard user that runs the exe (the browser that
+    # would use the PAC belongs to that user too).
+    $fetchIndex = 0
     foreach ($hostName in @($world['peer-short'], $world['peer-fqdn'])) {
+        $fetchIndex++
         $url = 'http://{0}:{1}/' -f $hostName, $world['peer-port']
-        $body = & curl.exe -s --max-time 30 -x "http://127.0.0.1:41112" $url
-        if ($LASTEXITCODE -ne 0 -or "$body" -ne $world['payload']) {
-            throw ("fetch through the loopback proxy failed for {0} (curl exit {1}, body '{2}'); output tail: {3}" -f $url, $LASTEXITCODE, $body, ((Get-LogDetail) -split "`n" | Select-Object -Last 5))
+        $fetchLog = Join-Path $auditDir ("fetch-{0}.log" -f $fetchIndex)
+        # Same launch shape as the exe: curl under cmd as the standard user,
+        # output redirected to a file, quote-free command line.
+        $fetchLine = 'curl.exe -s --max-time 30 -x http://127.0.0.1:41112 {0} > {1} 2>&1' -f $url, $fetchLog
+        $fetchProc = Start-Process -FilePath "$env:ComSpec" -ArgumentList "/c $fetchLine" -WorkingDirectory $auditDir -Credential $credential -LoadUserProfile -WindowStyle Hidden -PassThru
+        if (-not $fetchProc.WaitForExit(60000)) {
+            Stop-Process -Id $fetchProc.Id -Force -ErrorAction SilentlyContinue
+            throw "fetch through the loopback proxy timed out for $url"
         }
-        Write-Host "audit: proxied fetch OK: $url"
+        $body = if (Test-Path $fetchLog) { (Get-Content $fetchLog -Raw) } else { '' }
+        if ($fetchProc.ExitCode -ne 0 -or "$body".Trim() -ne $world['payload']) {
+            throw ("fetch through the loopback proxy failed for {0} (exit {1}, body '{2}'); output tail: {3}" -f $url, $fetchProc.ExitCode, $body, ((Get-LogDetail) -split "`n" | Select-Object -Last 5))
+        }
+        Write-Host "audit: proxied fetch as $user OK: $url"
     }
     Write-Host 'audit: PASS — standard user, no elevation, no non-loopback binds, tailnet URL served through the proxy'
 }
