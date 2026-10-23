@@ -93,6 +93,14 @@ function Get-LogDetail {
     return 'no output captured'
 }
 
+function ConvertTo-SafeEvents {
+    # Event names are exe-controlled data; sanitize them the same way as
+    # Get-LogDetail so a hostile value cannot smuggle a credential into
+    # public CI logs via the "events seen" diagnostics.
+    param([Parameter(Mandatory = $true)] $Events)
+    return ((($Events.Keys | Sort-Object) -join ',') -replace '(?i)\b[a-z][a-z0-9+.\-]*://\S+', '[url]') -replace 'tskey-\S+', '[authkey]'
+}
+
 try {
     # 1. The image must not ask Windows to elevate it.
     $bytes = [System.IO.File]::ReadAllBytes($srcExe)
@@ -191,7 +199,7 @@ try {
     $events = Read-Events
     if ($haveAuthKey) {
         if (-not $events.ContainsKey('connected')) {
-            throw ("TS_AUTHKEY was provided but the exe never reached the connected state; events seen: {0}; sockets seen: {1}; netstat: {2}; output tail: {3}" -f ($events.Keys -join ','), $sawSocket, ((netstat.exe -ano | Select-String $targetPid) -join ' | '), ((Get-LogDetail) -split "`n" | Select-Object -Last 5))
+            throw ("TS_AUTHKEY was provided but the exe never reached the connected state; events seen: {0}; sockets seen: {1}; netstat: {2}; output tail: {3}" -f (ConvertTo-SafeEvents $events), $sawSocket, ((netstat.exe -ano | Select-String $targetPid) -join ' | '), ((Get-LogDetail) -split "`n" | Select-Object -Last 5))
         }
         if (-not $sawSocket) {
             throw 'connected but no socket of the process was ever observed; the audit was not watching the right process'
@@ -201,7 +209,7 @@ try {
         }
     }
     elseif (-not $events.ContainsKey('auth')) {
-        throw ("the exe never printed a sign-in URL (events seen: {0}); netstat: {1}; output tail: {2}" -f ($events.Keys -join ','), ((netstat.exe -ano | Select-String $targetPid) -join ' | '), ((Get-LogDetail) -split "`n" | Select-Object -Last 5))
+        throw ("the exe never printed a sign-in URL (events seen: {0}); netstat: {1}; output tail: {2}" -f (ConvertTo-SafeEvents $events), ((netstat.exe -ano | Select-String $targetPid) -join ' | '), ((Get-LogDetail) -split "`n" | Select-Object -Last 5))
     }
     Write-Host 'audit: PASS — no elevation requested, no non-loopback binds as a standard user'
 }
