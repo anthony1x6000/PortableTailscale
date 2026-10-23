@@ -21,11 +21,11 @@ import (
 
 	"tailscale.com/derp/derpserver"
 	"tailscale.com/ipn/store/mem"
-	"tailscale.com/key"
 	"tailscale.com/net/netns"
 	"tailscale.com/tailcfg"
 	"tailscale.com/tsnet"
 	"tailscale.com/tstest/integration/testcontrol"
+	"tailscale.com/types/key"
 	"tailscale.com/types/logger"
 )
 
