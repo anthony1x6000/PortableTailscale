@@ -3,7 +3,8 @@
 PortableTailscale runs an **ephemeral** Tailscale node in userspace and gives a
 Windows desktop automatic access to tailnet machines by name. It is a single
 executable and runs as a regular user, without a TUN driver or administrator
-rights.
+rights — on Windows it never listens on a non-loopback address, so it never
+triggers the firewall's "allow on public and private networks" prompt.
 
 It provides three things:
 
@@ -105,6 +106,12 @@ admin console.
 This is a proxy, not a system VPN. It deliberately does not install a TUN
 adapter, change system DNS, or require administrator rights.
 
+- **Windows:** the program never creates a non-loopback listening socket. Doing
+  so is what makes Windows show the "allow on private and public networks"
+  firewall dialog, which a standard user cannot dismiss, so on Windows the
+  Tailscale node gives up its direct UDP paths: all tailnet traffic is relayed
+  through Tailscale's DERP servers and never uses LAN-direct connections. This
+  is the price of running with no administrator rights at all.
 - **Covered:** Chromium browsers using the system proxy, SSH/SCP/SFTP through the
   managed `ProxyCommand`, and any app you point at the loopback HTTP proxy, e.g.
   `curl -x http://127.0.0.1:41112 http://magicdns-name:8080/`.

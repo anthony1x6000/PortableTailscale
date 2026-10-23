@@ -24,6 +24,7 @@ import (
 
 	"portabletailscale/internal/private"
 
+	"tailscale.com/envknob"
 	"tailscale.com/ipn/store/mem"
 	"tailscale.com/tsnet"
 	"tailscale.com/types/logger"
@@ -175,6 +176,9 @@ func run(opts options) int {
 		})
 	}
 
+	// Set before srv.Start(): magicsock reads these knobs when it binds.
+	avoidWindowsFirewallPrompt(runtime.GOOS)
+
 	srv := &tsnet.Server{
 		Dir:       runtimeDir,
 		Store:     stateStore,
@@ -296,6 +300,23 @@ func run(opts options) int {
 	<-ctx.Done()
 	report.emit(event{Event: "stopping"})
 	return 0
+}
+
+// avoidWindowsFirewallPrompt keeps every socket in the embedded Tailscale node
+// on loopback. Windows shows the "allow ... on private and public networks"
+// firewall dialog the moment a process binds a non-loopback socket, and a
+// standard user cannot dismiss that dialog — only an administrator can. On
+// Windows the node therefore gives up direct WireGuard UDP paths (all traffic
+// is relayed through Tailscale's DERP servers) and skips the UPnP portmapper;
+// both of those bind wildcard UDP sockets. tsnet's knobs are read through
+// tailscale.com/envknob, whose Setenv updates them even though package
+// initialisation has already run.
+func avoidWindowsFirewallPrompt(goos string) {
+	if goos != "windows" {
+		return
+	}
+	envknob.Setenv("TS_DEBUG_ALWAYS_USE_DERP", "1")
+	envknob.Setenv("TS_DISABLE_PORTMAPPER", "1")
 }
 
 func installBrowser(report *reporter, dataDir string, dataErr error, pacURL string) {
