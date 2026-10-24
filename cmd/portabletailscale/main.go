@@ -60,6 +60,7 @@ type options struct {
 	uninstall      bool
 	stdio          bool
 	version        bool
+	forwards       []string
 	controlURL     string
 	deprecatedDir  string
 }
@@ -289,6 +290,25 @@ func run(opts options) int {
 		return 1
 	}
 
+	// Tailnet-facing bridges: each --forward listens inside the node's
+	// userspace network stack (no host socket, so the no-admin guarantee
+	// holds on Windows) and relays to a local loopback service.
+	forwardSpecs, err := parseForwards(opts.forwards)
+	if err != nil {
+		report.emit(event{Event: "error", Message: err.Error()})
+		return 1
+	}
+	for _, spec := range forwardSpecs {
+		ln, err := srv.Listen("tcp", fmt.Sprintf(":%d", spec.TailnetPort))
+		if err != nil {
+			report.emit(event{Event: "error", Message: fmt.Sprintf("forward tailnet port %d: %v", spec.TailnetPort, err)})
+			return 1
+		}
+		defer ln.Close()
+		go serveForward(ln, spec.LocalPort)
+		report.emit(event{Event: "message", Message: fmt.Sprintf("tailnet forward active: %s:%d -> 127.0.0.1:%d", opts.hostname, spec.TailnetPort, spec.LocalPort)})
+	}
+
 	proxyURL := (&url.URL{
 		Scheme: "socks5",
 		User:   url.UserPassword("tsnet", proxyPassword),
@@ -459,6 +479,13 @@ func parseOptions() (options, error) {
 	flag.StringVar(&opts.controlURL, "control-url", "", "internal: alternate control server URL (used by e2e tests)")
 	flag.BoolVar(&opts.stdio, "stdio", false, "internal: tunnel stdin/stdout to HOST PORT")
 	flag.BoolVar(&opts.version, "version", false, "print the build version and exit")
+	flag.Func("forward", "bridge a tailnet port to a local loopback port (TAILNET_PORT:LOCAL_PORT, repeatable)", func(value string) error {
+		if _, err := parseForwards([]string{value}); err != nil {
+			return err
+		}
+		opts.forwards = append(opts.forwards, value)
+		return nil
+	})
 	flag.StringVar(&opts.deprecatedDir, "state-dir", "", "deprecated: ignored; no identity is persisted")
 	flag.Parse()
 

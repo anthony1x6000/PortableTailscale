@@ -159,6 +159,25 @@ UDP socket, which is the one thing left in the data path that can make
 Windows show its firewall dialog; the PAC/SSH paths only ever resolve tailnet
 names and are not affected.
 
+## Serving a local service on the tailnet
+
+`--forward TAILNET_PORT:LOCAL_PORT` (repeatable) turns the ephemeral node
+into a server: after sign-in, tailnet peers can reach `hostname:TAILNET_PORT`
+and the node relays those connections to `127.0.0.1:LOCAL_PORT`. The listener
+lives inside the node's userspace network stack — nothing binds on the host,
+so it works without administrator rights and never triggers the Windows
+firewall dialog. Peers still need tailnet ACLs allowing your user on that
+port, and clients reach the service through their own proxy (browsers via the
+PAC, SOCKS5 clients via `socks5h`). For example, serving a loopback-only web
+app to the tailnet:
+
+```text
+PortableTailscale.exe --hostname my-app --forward 8080:8080
+```
+
+This is how [dsh-remote](https://github.com/anthony1x6000/dsh-remote) serves
+`dsh web` on machines without a Tailscale installation.
+
 ## RDP example
 
 `PortableTailscaleRDP.exe` is an example client included with the project. It
@@ -296,6 +315,7 @@ no ACLs, so there the folder is only as private as the drive.
 --install         Install the browser PAC and SSH config, then run
 --uninstall       Remove the browser PAC and SSH config, then exit
 --hostname NAME   Tailnet device name (default: portable-tailscale)
+--forward A:B     Bridge tailnet port A to local loopback port B (repeatable)
 --json            Write newline-delimited status events
 --no-browser      Print the sign-in URL without opening a browser
 --state-dir PATH  Deprecated and ignored; no identity is persisted
