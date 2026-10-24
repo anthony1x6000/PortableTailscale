@@ -166,17 +166,21 @@ into a server: after sign-in, tailnet peers can reach `hostname:TAILNET_PORT`
 and the node relays those connections to `127.0.0.1:LOCAL_PORT`. The listener
 lives inside the node's userspace network stack — nothing binds on the host,
 so it works without administrator rights and never triggers the Windows
-firewall dialog. Peers still need tailnet ACLs allowing your user on that
-port, and clients reach the service through their own proxy (browsers via the
-PAC, SOCKS5 clients via `socks5h`). For example, serving a loopback-only web
-app to the tailnet:
+firewall dialog. Clients reach the service through their own proxy (browsers
+via the PAC, SOCKS5 clients via `socks5h`). For example, serving a
+loopback-only web app to the tailnet:
 
 ```text
 PortableTailscale.exe --hostname my-app --forward 8080:8080
 ```
 
-This is how [dsh-remote](https://github.com/anthony1x6000/dsh-remote) serves
-`dsh web` on machines without a Tailscale installation.
+**The local service sees every connection as coming from `127.0.0.1`.** The
+tailnet ACL is the only access gate: allow only your user on the forwarded
+port, and do not let the service grant extra trust to "localhost" callers —
+every ACL-allowed peer arrives as one. Relay connections cap at 256 with a
+10-minute idle timeout. This is how
+[dsh-remote](https://github.com/anthony1x6000/dsh-remote) serves `dsh web` on
+machines without a Tailscale installation.
 
 ## RDP example
 

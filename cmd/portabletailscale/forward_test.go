@@ -1,12 +1,12 @@
 package main
 
 import (
+	"bufio"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
-	"time"
 )
 
 func TestParseForwards(t *testing.T) {
@@ -59,18 +59,26 @@ func TestServeForwardRelays(t *testing.T) {
 
 	// One request/response pair through the relay, like a browser hit. The
 	// Host header must arrive unmodified: DSH's /api fence keys on it.
-	_, _ = client.Write([]byte("GET / HTTP/1.1\r\nHost: dsh-host:3080\r\nConnection: close\r\n\r\n"))
-	_ = client.SetReadDeadline(time.Now().Add(5 * time.Second))
-	buf := make([]byte, 1024)
-	n, err := client.Read(buf)
+	request, err := http.NewRequest(http.MethodGet, "http://dsh-host:3080/", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp := string(buf[:n])
-	if !strings.HasPrefix(resp, "HTTP/1.1 200") {
-		t.Fatalf("relay response status line = %q", resp)
+	request.Header.Set("Connection", "close")
+	if err := request.Write(client); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(resp, "bridge-ok:dsh-host:3080") {
-		t.Fatalf("relay did not preserve the request (Host header): %q", resp)
+	response, err := http.ReadResponse(bufio.NewReader(client), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("relay response status = %d", response.StatusCode)
+	}
+	if string(body) != "bridge-ok:dsh-host:3080" {
+		t.Fatalf("relay did not preserve the request (Host header): %q", body)
 	}
 }
