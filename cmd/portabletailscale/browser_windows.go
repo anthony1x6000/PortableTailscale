@@ -147,6 +147,10 @@ func writeAutoConfigURL(value string) error {
 	return key.SetStringValue("AutoConfigURL", value)
 }
 
+// readBrowserPrevious returns the trusted prior AutoConfigURL, or "" when
+// there is none. A value that cannot be read as a string (wrong type, or a
+// corrupt entry) counts as none: it is not a prior this program wrote, and
+// failing here would wedge every later install/deactivate/uninstall.
 func readBrowserPrevious() (string, error) {
 	key, err := registry.OpenKey(registry.CURRENT_USER, internetSettingsKeyPath, registry.QUERY_VALUE)
 	if err != nil {
@@ -162,7 +166,7 @@ func readBrowserPrevious() (string, error) {
 		return "", nil
 	}
 	if err != nil {
-		return "", err
+		return "", nil
 	}
 	return value, nil
 }
@@ -183,8 +187,12 @@ func writeBrowserPrevious(value string) error {
 	return key.SetStringValue(portableTailscalePreviousValue, value)
 }
 
+// isOurPACURL reports whether current points at this program's PAC: the base
+// followed by nothing or by a query. A bare prefix match would also accept a
+// foreign path such as "<base>-evil".
 func isOurPACURL(current string) bool {
-	return strings.HasPrefix(current, pacBaseURL())
+	rest, ok := strings.CutPrefix(current, pacBaseURL())
+	return ok && (rest == "" || rest[0] == '?')
 }
 
 // clearOurPAC clears AutoConfigURL when it currently points at this
@@ -231,18 +239,24 @@ func installBrowserPAC(dataDir, pacURL string) error {
 	}
 
 	path := browserBackupPath(dataDir)
-	_, exists, err := loadBrowserBackup(path)
-	if err != nil {
-		return err
-	}
-	// Capture the real prior whenever the current setting is foreign, never
-	// gated on the marker file: a planted marker of the right shape would
-	// otherwise skip the capture and leave deactivate blanking the user's
-	// proxy setting instead of restoring it. An empty or ours current leaves
-	// the stored value alone — destroying the only restore copy (an
-	// upgrade-over or corrupt-file reinstall) would be unrecoverable.
+	// An unreadable marker counts as absent: plantable, so it must not be
+	// able to block the install by being held open or replaced.
+	_, exists, _ := loadBrowserBackup(path)
+	// Capture the prior from the current setting alone, never from the
+	// plantable marker: a planted marker of the right shape would otherwise
+	// skip the capture and leave deactivate blanking the user's proxy.
+	//   - foreign: the user's real prior, stored verbatim;
+	//   - empty: no prior exists, so drop a value left by an earlier install
+	//     (restoring it later would resurrect a proxy the user removed);
+	//   - ours: a reinstall/upgrade-over, keep the stored prior — destroying
+	//     the only restore copy would be unrecoverable.
 	prior := ""
-	if current != "" && !isOurPACURL(current) {
+	switch {
+	case current == "":
+		if err := writeBrowserPrevious(""); err != nil {
+			return err
+		}
+	case !isOurPACURL(current):
 		// The registry is the trusted per-user hive: store a captured
 		// foreign prior verbatim — including shapes the file field filters,
 		// like file:// — so deactivate can always put it back.
@@ -301,17 +315,16 @@ func reactivateBrowserPAC(dataDir, pacURL string) error {
 
 // deactivateBrowserPAC puts the previous proxy setting back when the program
 // exits, or clears our PAC when there is no prior. The restore value comes
-// from HKCU, which no other local principal can plant; the marker file is
-// only read to drop a junk copy and never gates the restore, so deleting or
-// corrupting it cannot cost the user their proxy setting. The backup stays so
-// the next run can reactivate it.
+// from HKCU, which no other local principal can plant. The marker file is
+// only read to drop a junk copy: neither its absence nor a read failure may
+// gate the restore, or a local principal could pin a stale PAC by deleting,
+// corrupting, or holding the file open. The backup stays so the next run can
+// reactivate it.
 func deactivateBrowserPAC(dataDir string) error {
 	if dataDir == "" {
 		return nil
 	}
-	if _, _, err := loadBrowserBackup(browserBackupPath(dataDir)); err != nil {
-		return err
-	}
+	_, _, _ = loadBrowserBackup(browserBackupPath(dataDir)) // best-effort purge
 	current, err := readAutoConfigURL()
 	if err != nil {
 		return err
@@ -337,16 +350,14 @@ func clearOrphanPAC(dataDir string) error {
 }
 
 // uninstallBrowserPAC restores the prior setting from HKCU, drops the
-// restore value and the marker file. Like deactivate, it never consults the
-// plantable marker for the restore decision.
+// restore value and the marker file. Like deactivate, an unreadable marker
+// must not stop the restore.
 func uninstallBrowserPAC(dataDir string) error {
 	if dataDir == "" {
 		return nil
 	}
 	path := browserBackupPath(dataDir)
-	if _, _, err := loadBrowserBackup(path); err != nil {
-		return err
-	}
+	_, _, _ = loadBrowserBackup(path) // best-effort purge
 
 	current, err := readAutoConfigURL()
 	if err != nil {

@@ -645,3 +645,83 @@ func TestBrowserUninstallRestoresWhenMarkerMissing(t *testing.T) {
 	}
 }
 
+// An unreadable marker (here: a directory squatting the path) must not abort
+// cleanup — a local principal could otherwise pin a stale PAC by holding or
+// replacing the file.
+func TestBrowserDeactivateCleansWhenMarkerUnreadable(t *testing.T) {
+	withTestRegistry(t)
+	dataDir := t.TempDir()
+	if err := os.MkdirAll(browserBackupPath(dataDir), 0700); err != nil {
+		t.Fatal(err)
+	}
+	setTestAutoConfig(t, pacURLFor("tok", time.Unix(1, 0)))
+
+	if err := deactivateBrowserPAC(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	if got := readTestAutoConfig(t); got != "" {
+		t.Fatalf("AutoConfigURL = %q, want our PAC cleared despite the unreadable marker", got)
+	}
+}
+
+// The uninstall path must survive the same unreadable marker.
+func TestBrowserUninstallCleansWhenMarkerUnreadable(t *testing.T) {
+	withTestRegistry(t)
+	dataDir := t.TempDir()
+	if err := os.MkdirAll(browserBackupPath(dataDir), 0700); err != nil {
+		t.Fatal(err)
+	}
+	setTestAutoConfig(t, pacURLFor("tok", time.Unix(1, 0)))
+
+	if err := uninstallBrowserPAC(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	if got := readTestAutoConfig(t); got != "" {
+		t.Fatalf("AutoConfigURL = %q, want our PAC cleared despite the unreadable marker", got)
+	}
+}
+
+// Installing with no current proxy means the user has none: a prior left by
+// an earlier install must be dropped, or the next deactivate resurrects a
+// proxy setting the user removed.
+func TestBrowserInstallWithEmptyCurrentClearsStalePrevious(t *testing.T) {
+	withTestRegistry(t)
+	dataDir := t.TempDir()
+	if err := writeBrowserPrevious("http://corp.example/proxy.pac"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := installBrowserPAC(dataDir, pacURLFor("tok", time.Unix(1, 0))); err != nil {
+		t.Fatal(err)
+	}
+	if previous, err := readBrowserPrevious(); err != nil || previous != "" {
+		t.Fatalf("registry Previous = %q, %v, want cleared for an empty current", previous, err)
+	}
+
+	if err := deactivateBrowserPAC(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	if got := readTestAutoConfig(t); got != "" {
+		t.Fatalf("deactivate restored the stale prior %q, want empty", got)
+	}
+}
+
+// isOurPACURL must not accept a foreign path that merely starts with our base.
+func TestIsOurPACURLRequiresBoundary(t *testing.T) {
+	if !isOurPACURL(pacBaseURL()) {
+		t.Fatal("the bare PAC base is not recognized")
+	}
+	if !isOurPACURL(pacURLFor("tok", time.Unix(1, 0))) {
+		t.Fatal("a tokenized PAC URL is not recognized")
+	}
+	for _, foreign := range []string{
+		pacBaseURL() + "-evil",
+		pacBaseURL() + "x?t=tok",
+		"http://attacker.example/proxy.pac",
+	} {
+		if isOurPACURL(foreign) {
+			t.Fatalf("isOurPACURL accepted the foreign URL %q", foreign)
+		}
+	}
+}
+
