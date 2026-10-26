@@ -101,6 +101,11 @@ version. It is no longer read; a startup warning points at it. Delete it if you
 do not want the old identity on disk, and revoke that device in the Tailscale
 admin console.
 
+The console shows only actionable output. Diagnostics from the embedded
+Tailscale are suppressed, including Windows proxy auto-detection failures
+(`tshttpproxy ... winapi error #12167`), which only mean "no WPAD script —
+direct internet" and are harmless.
+
 ## Usage limits
 
 This is a proxy, not a system VPN. It deliberately does not install a TUN

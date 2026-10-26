@@ -141,6 +141,7 @@ func header(color bool) string {
 }
 
 func main() {
+	installLogNoiseFilter()
 	opts, err := parseOptions()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
