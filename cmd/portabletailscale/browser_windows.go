@@ -171,18 +171,17 @@ func readBrowserPrevious() (string, error) {
 	}
 	defer key.Close()
 
-	value, valType, err := key.GetValue(portableTailscalePreviousValue)
+	value, _, err := key.GetStringValue(portableTailscalePreviousValue)
 	if errors.Is(err, fs.ErrNotExist) {
 		return "", nil
+	}
+	if errors.Is(err, registry.ErrUnexpectedType) {
+		return "", nil // not a prior this program wrote
 	}
 	if err != nil {
 		return "", err
 	}
-	if valType != registry.SZ {
-		return "", nil
-	}
-	prior, _ := value.(string)
-	return prior, nil
+	return value, nil
 }
 
 func writeBrowserPrevious(value string) error {
