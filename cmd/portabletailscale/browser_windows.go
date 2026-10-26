@@ -34,6 +34,20 @@ var refreshWinINET = func() {
 	_, _, _ = proc.Call(0, 37, 0, 0) // INTERNET_OPTION_REFRESH
 }
 
+// readBrowserBackupBody reads at most browserBackupMaxSize+1 bytes and closes
+// the handle before returning. It must close before the caller can unlink:
+// Go opens files with FILE_SHARE_READ|FILE_SHARE_WRITE only, so on Windows a
+// delete of a still-open path fails with a sharing violation (on Unix it
+// would succeed), leaving the invalid backup to suppress cleanup.
+func readBrowserBackupBody(path string) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	return io.ReadAll(io.LimitReader(file, browserBackupMaxSize+1))
+}
+
 // loadBrowserBackup returns the saved backup state. The read is bounded;
 // a file this program could not have written — unparsable, planted with a
 // foreign PACBase or a non-URL Previous, oversized, or from an incompatible
@@ -45,15 +59,10 @@ var refreshWinINET = func() {
 // clears fail-safe — migrating it would make the plantable file a restore
 // source again.
 func loadBrowserBackup(path string) (browserBackup, bool, error) {
-	file, err := os.Open(path)
+	data, err := readBrowserBackupBody(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return browserBackup{}, false, nil
 	}
-	if err != nil {
-		return browserBackup{}, false, err
-	}
-	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, browserBackupMaxSize+1))
 	if err != nil {
 		return browserBackup{}, false, err
 	}
