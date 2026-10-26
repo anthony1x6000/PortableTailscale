@@ -18,6 +18,13 @@ import (
 
 var internetSettingsKeyPath = `Software\Microsoft\Windows\CurrentVersion\Internet Settings`
 
+// portableTailscalePreviousValue holds the pre-install AutoConfigURL beside
+// AutoConfigURL in the same HKCU key. Trust split: the exe-adjacent file is
+// only the PACBase/existence marker (validated but plantable), while this
+// per-user registry value — which other local principals cannot plant — is
+// the restore authority for the prior setting.
+const portableTailscalePreviousValue = "PortableTailscalePrevious"
+
 // refreshWinINET is a variable so tests can avoid touching the live browser.
 var refreshWinINET = func() {
 	dll := syscall.NewLazyDLL("wininet.dll")
@@ -30,7 +37,8 @@ var refreshWinINET = func() {
 // not have written — unparsable, planted with a foreign PACBase or a
 // non-URL Previous, or from an incompatible format — is reported as absent so
 // callers re-capture the real registry state instead of restoring attacker
-// content (the file is exe-adjacent and not trusted; see browser.go).
+// content. The file's Previous field is informational only; restores read
+// readBrowserPrevious instead (see the trust split above).
 func loadBrowserBackup(path string) (browserBackup, bool, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -115,6 +123,42 @@ func writeAutoConfigURL(value string) error {
 	return key.SetStringValue("AutoConfigURL", value)
 }
 
+func readBrowserPrevious() (string, error) {
+	key, err := registry.OpenKey(registry.CURRENT_USER, internetSettingsKeyPath, registry.QUERY_VALUE)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", nil
+		}
+		return "", err
+	}
+	defer key.Close()
+
+	value, _, err := key.GetStringValue(portableTailscalePreviousValue)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return value, nil
+}
+
+func writeBrowserPrevious(value string) error {
+	key, err := registry.OpenKey(registry.CURRENT_USER, internetSettingsKeyPath, registry.QUERY_VALUE|registry.SET_VALUE)
+	if err != nil {
+		return err
+	}
+	defer key.Close()
+
+	if value == "" {
+		if err := key.DeleteValue(portableTailscalePreviousValue); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	return key.SetStringValue(portableTailscalePreviousValue, value)
+}
+
 func installBrowserPAC(dataDir, pacURL string) error {
 	if dataDir == "" {
 		return errors.New("no data directory")
@@ -132,7 +176,12 @@ func installBrowserPAC(dataDir, pacURL string) error {
 	if !exists {
 		backup = browserBackup{PACBase: pacBaseURL()}
 		if current != "" && !strings.HasPrefix(current, backup.PACBase) {
-			backup.Previous = current
+			backup.Previous = storablePrevious(current)
+		}
+		// The registry value is the restore authority; the file field is a
+		// copy for inspection. An existing backup keeps its stored value.
+		if err := writeBrowserPrevious(backup.Previous); err != nil {
+			return err
 		}
 		if err := saveBrowserBackup(path, backup); err != nil {
 			return err
@@ -164,9 +213,13 @@ func reactivateBrowserPAC(dataDir, pacURL string) error {
 	if err != nil {
 		return err
 	}
+	previous, err := readBrowserPrevious()
+	if err != nil {
+		return err
+	}
 
 	ours := strings.HasPrefix(current, backup.PACBase)
-	restored := current == backup.Previous
+	restored := current == previous
 	if !ours && !restored {
 		return nil
 	}
@@ -178,7 +231,9 @@ func reactivateBrowserPAC(dataDir, pacURL string) error {
 }
 
 // deactivateBrowserPAC puts the previous proxy setting back when the program
-// exits. The backup stays so the next run can reactivate it.
+// exits. The file only proves the PAC is ours (PACBase); the value restored
+// comes from HKCU, which no other local principal can plant. The backup
+// stays so the next run can reactivate it.
 func deactivateBrowserPAC(dataDir string) error {
 	if dataDir == "" {
 		return nil
@@ -194,8 +249,12 @@ func deactivateBrowserPAC(dataDir string) error {
 	if !strings.HasPrefix(current, backup.PACBase) {
 		return nil
 	}
-	if backup.Previous != "" {
-		if err := writeAutoConfigURL(backup.Previous); err != nil {
+	previous, err := readBrowserPrevious()
+	if err != nil {
+		return err
+	}
+	if previous != "" {
+		if err := writeAutoConfigURL(previous); err != nil {
 			return err
 		}
 	} else if err := writeAutoConfigURL(""); err != nil {
@@ -259,13 +318,20 @@ func uninstallBrowserPAC(dataDir string) error {
 	}
 	ours := strings.HasPrefix(current, backup.PACBase)
 	if ours {
-		if backup.Previous != "" {
-			if err := writeAutoConfigURL(backup.Previous); err != nil {
+		previous, err := readBrowserPrevious()
+		if err != nil {
+			return err
+		}
+		if previous != "" {
+			if err := writeAutoConfigURL(previous); err != nil {
 				return err
 			}
 		} else if err := writeAutoConfigURL(""); err != nil {
 			return err
 		}
+	}
+	if err := writeBrowserPrevious(""); err != nil {
+		return err
 	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err

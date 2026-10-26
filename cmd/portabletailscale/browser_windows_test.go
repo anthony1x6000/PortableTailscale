@@ -63,6 +63,13 @@ func TestBrowserInstallRestore(t *testing.T) {
 	if backup.Previous != "http://corp.example/proxy.pac" {
 		t.Fatalf("previous = %q", backup.Previous)
 	}
+	previous, err := readBrowserPrevious()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if previous != "http://corp.example/proxy.pac" {
+		t.Fatalf("registry Previous = %q, want the pre-install AutoConfigURL", previous)
+	}
 
 	if err := uninstallBrowserPAC(dataDir); err != nil {
 		t.Fatal(err)
@@ -73,6 +80,9 @@ func TestBrowserInstallRestore(t *testing.T) {
 	}
 	if current != "http://corp.example/proxy.pac" {
 		t.Fatalf("restored %q", current)
+	}
+	if previous, err := readBrowserPrevious(); err != nil || previous != "" {
+		t.Fatalf("registry Previous after uninstall = %q, %v, want deleted", previous, err)
 	}
 	if _, err := os.Stat(browserBackupPath(dataDir)); !os.IsNotExist(err) {
 		t.Fatal("backup file was not removed")
@@ -389,5 +399,87 @@ func TestBrowserInstallRecapturesOverPlantedBackup(t *testing.T) {
 	}
 	if backup.Previous != "http://corp.example/proxy.pac" || backup.PACBase != pacBaseURL() {
 		t.Fatalf("re-captured backup = %+v, want previous corp PAC and our base", backup)
+	}
+}
+
+// The file is only the PACBase/existence marker: even a well-formed planted
+// Previous with the correct base must never restore — the registry is the
+// restore authority. With no registry Previous, deactivate clears.
+func TestBrowserDeactivateIgnoresPlantedPreviousWithCorrectBase(t *testing.T) {
+	withTestRegistry(t)
+	dataDir := t.TempDir()
+	seedBackupFile(t, dataDir, `{"previous":"http://attacker.example/pac","pacBase":"`+pacBaseURL()+`"}`)
+	if err := writeBrowserPrevious(""); err != nil {
+		t.Fatal(err)
+	}
+	setTestAutoConfig(t, pacURLFor("tok", time.Unix(1, 0)))
+
+	if err := deactivateBrowserPAC(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	if got := readTestAutoConfig(t); got != "" {
+		t.Fatalf("deactivate left %q, want cleared and never the planted Previous", got)
+	}
+}
+
+// The pre-install value restores from HKCU, not from the file: a registry
+// Previous wins over whatever the file claims.
+func TestBrowserDeactivateRestoresRegistryPrevious(t *testing.T) {
+	withTestRegistry(t)
+	dataDir := t.TempDir()
+	seedBackupFile(t, dataDir, `{"previous":"http://attacker.example/pac","pacBase":"`+pacBaseURL()+`"}`)
+	if err := writeBrowserPrevious("http://corp.example/proxy.pac"); err != nil {
+		t.Fatal(err)
+	}
+	setTestAutoConfig(t, pacURLFor("tok", time.Unix(1, 0)))
+
+	if err := deactivateBrowserPAC(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	if got := readTestAutoConfig(t); got != "http://corp.example/proxy.pac" {
+		t.Fatalf("deactivate left %q, want the registry Previous", got)
+	}
+}
+
+// Capture/load symmetry: a current AutoConfigURL the validator refuses to
+// restore (file:// is legit for WinINET but not restorable by us) is stored
+// as empty, so a later deactivate clears instead of failing to restore.
+func TestBrowserInstallStoresUnstorablePreviousAsEmpty(t *testing.T) {
+	withTestRegistry(t)
+	dataDir := t.TempDir()
+	setTestAutoConfig(t, "file:///C:/something")
+
+	if err := installBrowserPAC(dataDir, pacURLFor("tok", time.Unix(1, 0))); err != nil {
+		t.Fatal(err)
+	}
+	previous, err := readBrowserPrevious()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if previous != "" {
+		t.Fatalf("registry Previous = %q, want empty", previous)
+	}
+	backup, ok, err := loadBrowserBackup(browserBackupPath(dataDir))
+	if err != nil || !ok {
+		t.Fatalf("backup: ok=%v err=%v", ok, err)
+	}
+	if backup.Previous != "" {
+		t.Fatalf("backup Previous = %q, want empty", backup.Previous)
+	}
+
+	if err := deactivateBrowserPAC(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	if got := readTestAutoConfig(t); got != "" {
+		t.Fatalf("AutoConfigURL = %q, want cleared", got)
+	}
+}
+
+// An oversized backup file is not something we wrote: refuse to read it.
+func TestBrowserConfiguredFalseForOversizedBackup(t *testing.T) {
+	dataDir := t.TempDir()
+	seedBackupFile(t, dataDir, `{"previous":"","pacBase":"`+pacBaseURL()+`"}`+strings.Repeat(" ", 5000))
+	if browserConfigured(dataDir) {
+		t.Fatal("browserConfigured accepted an oversized backup file")
 	}
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -10,10 +11,26 @@ import (
 // browserBackup records the WinINET AutoConfigURL state this program changed.
 // The file lives in the executable-adjacent data directory, where other local
 // principals may be able to plant or replace it (FAT/exFAT installs have no
-// ACLs), so nothing may restore from it without validating the content first.
+// ACLs), so it is only the PACBase/existence marker: restore authority for
+// the prior AutoConfigURL is the per-user registry value (browser_windows.go),
+// and the Previous field here is informational.
 type browserBackup struct {
 	Previous string `json:"previous"`
 	PACBase  string `json:"pacBase"`
+}
+
+// validPreviousURL reports whether v is an absolute http(s) URL with a host
+// and no userinfo or fragment — the shape that may be restored into
+// AutoConfigURL. Empty is the caller's decision.
+func validPreviousURL(v string) bool {
+	u, err := url.Parse(v)
+	if err != nil || !u.IsAbs() || u.Host == "" {
+		return false
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return false
+	}
+	return u.User == nil && u.Fragment == ""
 }
 
 // validBrowserBackup reports whether b is a backup this program could have
@@ -24,17 +41,18 @@ func validBrowserBackup(b browserBackup) bool {
 	if b.PACBase != pacBaseURL() {
 		return false
 	}
-	if b.Previous == "" {
-		return true
+	return b.Previous == "" || validPreviousURL(b.Previous)
+}
+
+// storablePrevious keeps capture/load symmetric: only a value the validator
+// would restore is stored; anything else (e.g. a file:// URL WinINET accepts
+// but validPreviousURL refuses) is stored empty so a later deactivate clears
+// instead of loading as absent and never restoring.
+func storablePrevious(v string) string {
+	if v == "" || validPreviousURL(v) {
+		return v
 	}
-	u, err := url.Parse(b.Previous)
-	if err != nil || !u.IsAbs() || u.Host == "" {
-		return false
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return false
-	}
-	return u.User == nil && u.Fragment == ""
+	return ""
 }
 
 // parseBrowserBackup decodes a backup file body and reports whether it is one
@@ -52,16 +70,25 @@ func browserBackupPath(dataDir string) string {
 	return filepath.Join(dataDir, "browser-proxy.json")
 }
 
+// browserBackupMaxSize bounds reads of the untrusted exe-adjacent file; a
+// real backup is a few hundred bytes.
+const browserBackupMaxSize = 4096
+
 // browserConfigured reports whether a browser install this program recognizes
 // exists. A backup file only counts when it is one we could have written;
-// a planted or corrupt file must not mark an install (it would otherwise
-// suppress stale-PAC cleanup) — install re-captures over it instead.
+// a planted, corrupt, or oversized file must not mark an install (it would
+// otherwise suppress stale-PAC cleanup) — install re-captures over it instead.
 func browserConfigured(dataDir string) bool {
 	if dataDir == "" {
 		return false
 	}
-	data, err := os.ReadFile(browserBackupPath(dataDir))
+	file, err := os.Open(browserBackupPath(dataDir))
 	if err != nil {
+		return false
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, browserBackupMaxSize+1))
+	if err != nil || len(data) > browserBackupMaxSize {
 		return false
 	}
 	_, ok := parseBrowserBackup(data)
