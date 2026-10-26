@@ -503,8 +503,9 @@ func TestBrowserDeactivateCleansOurPACWhenBackupInvalid(t *testing.T) {
 	}
 }
 
-// Uninstall with an invalid backup: our PAC cleared, registry Previous
-// deleted, file removed.
+// Uninstall with an invalid backup restores the trusted prior instead of
+// blanking it — a corrupt marker must not cost the user their proxy setting —
+// then drops the restore value and the file.
 func TestBrowserUninstallCleansWhenBackupInvalid(t *testing.T) {
 	withTestRegistry(t)
 	dataDir := t.TempDir()
@@ -517,8 +518,8 @@ func TestBrowserUninstallCleansWhenBackupInvalid(t *testing.T) {
 	if err := uninstallBrowserPAC(dataDir); err != nil {
 		t.Fatal(err)
 	}
-	if got := readTestAutoConfig(t); got != "" {
-		t.Fatalf("AutoConfigURL = %q, want our PAC cleared", got)
+	if got := readTestAutoConfig(t); got != "http://corp.example/proxy.pac" {
+		t.Fatalf("AutoConfigURL = %q, want the trusted prior restored", got)
 	}
 	if previous, err := readBrowserPrevious(); err != nil || previous != "" {
 		t.Fatalf("registry Previous = %q, %v, want deleted", previous, err)
@@ -580,3 +581,67 @@ func TestBrowserOversizedBackupTreatedAsAbsent(t *testing.T) {
 		t.Fatalf("registry Previous = %q, %v, want re-captured", previous, err)
 	}
 }
+
+// A planted marker of the right shape (our base, empty Previous) still must
+// not stop install from capturing the real prior: gating capture on the file
+// let a local writer make deactivate blank the user's proxy setting.
+func TestBrowserInstallCapturesOverValidPlantedMarker(t *testing.T) {
+	withTestRegistry(t)
+	dataDir := t.TempDir()
+	seedBackupFile(t, dataDir, `{"previous":"","pacBase":"`+pacBaseURL()+`"}`)
+	setTestAutoConfig(t, "http://corp.example/proxy.pac")
+
+	if err := installBrowserPAC(dataDir, pacURLFor("tok", time.Unix(1, 0))); err != nil {
+		t.Fatal(err)
+	}
+	if previous, err := readBrowserPrevious(); err != nil || previous != "http://corp.example/proxy.pac" {
+		t.Fatalf("registry Previous = %q, %v, want the prior captured over the marker", previous, err)
+	}
+
+	if err := deactivateBrowserPAC(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	if got := readTestAutoConfig(t); got != "http://corp.example/proxy.pac" {
+		t.Fatalf("deactivate left %q, want the captured prior restored", got)
+	}
+}
+
+// Deleting the marker file must not destroy the restore value: the trusted
+// HKCU prior is still restored, so a local writer cannot blank the user's
+// proxy setting by removing or corrupting the plantable file.
+func TestBrowserDeactivateRestoresWhenMarkerMissing(t *testing.T) {
+	withTestRegistry(t)
+	dataDir := t.TempDir() // no marker beside the executable
+	if err := writeBrowserPrevious("http://corp.example/proxy.pac"); err != nil {
+		t.Fatal(err)
+	}
+	setTestAutoConfig(t, pacURLFor("tok", time.Unix(1, 0)))
+
+	if err := deactivateBrowserPAC(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	if got := readTestAutoConfig(t); got != "http://corp.example/proxy.pac" {
+		t.Fatalf("AutoConfigURL = %q, want the trusted prior restored", got)
+	}
+}
+
+// Same for uninstall: restore from HKCU before dropping the value.
+func TestBrowserUninstallRestoresWhenMarkerMissing(t *testing.T) {
+	withTestRegistry(t)
+	dataDir := t.TempDir()
+	if err := writeBrowserPrevious("http://corp.example/proxy.pac"); err != nil {
+		t.Fatal(err)
+	}
+	setTestAutoConfig(t, pacURLFor("tok", time.Unix(1, 0)))
+
+	if err := uninstallBrowserPAC(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	if got := readTestAutoConfig(t); got != "http://corp.example/proxy.pac" {
+		t.Fatalf("AutoConfigURL = %q, want the trusted prior restored", got)
+	}
+	if previous, err := readBrowserPrevious(); err != nil || previous != "" {
+		t.Fatalf("registry Previous = %q, %v, want deleted", previous, err)
+	}
+}
+
