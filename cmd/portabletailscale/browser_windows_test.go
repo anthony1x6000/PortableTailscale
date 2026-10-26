@@ -204,15 +204,26 @@ func TestBrowserCorruptBackup(t *testing.T) {
 	if err := os.WriteFile(browserBackupPath(dataDir), []byte("{not json"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := installBrowserPAC(dataDir, pacURLFor("tok", time.Unix(1, 0))); err == nil {
-		t.Fatal("expected a parse error")
+	// A corrupt file is not restore state: treat it as absent, install
+	// re-captures the real value, and the file is replaced with a valid
+	// backup instead of aborting PAC management entirely.
+	pac := pacURLFor("tok", time.Unix(1, 0))
+	if err := installBrowserPAC(dataDir, pac); err != nil {
+		t.Fatal(err)
 	}
 	current, err := readAutoConfigURL()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current != "http://keep.example/pac" {
-		t.Fatalf("value changed after corrupt backup: %q", current)
+	if current != pac {
+		t.Fatalf("AutoConfigURL = %q, want %q", current, pac)
+	}
+	backup, ok, err := loadBrowserBackup(browserBackupPath(dataDir))
+	if err != nil || !ok {
+		t.Fatalf("corrupt backup not replaced: ok=%v err=%v", ok, err)
+	}
+	if backup.Previous != "http://keep.example/pac" {
+		t.Fatalf("re-captured previous = %q, want the pre-install value", backup.Previous)
 	}
 }
 
@@ -287,5 +298,96 @@ func TestClearOrphanPAC(t *testing.T) {
 	}
 	if current, err := readAutoConfigURL(); err != nil || current != pacBaseURL()+"?t=live&v=2" {
 		t.Fatalf("backed-up PAC was touched by the orphan clear: %q, %v", current, err)
+	}
+}
+
+func seedBackupFile(t *testing.T, dataDir, content string) {
+	t.Helper()
+	if err := os.MkdirAll(dataDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(browserBackupPath(dataDir), []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeTestAutoConfig(t *testing.T, value string) {
+	t.Helper()
+	if err := writeAutoConfigURL(value); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readTestAutoConfig(t *testing.T) string {
+	t.Helper()
+	value, err := readAutoConfigURL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return value
+}
+
+// A backup with a widened PACBase is not one of ours: deactivate must never
+// treat a foreign AutoConfigURL as ours and restore the poisoned Previous.
+func TestBrowserDeactivateIgnoresPoisonedPACBase(t *testing.T) {
+	withTestRegistry(t)
+	dataDir := t.TempDir()
+	seedBackupFile(t, dataDir, `{"previous":"http://127.0.0.1:9/pac","pacBase":"h"}`)
+	writeTestAutoConfig(t, "http://corp.example/proxy.pac")
+
+	if err := deactivateBrowserPAC(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	if got := readTestAutoConfig(t); got != "http://corp.example/proxy.pac" {
+		t.Fatalf("deactivate rewrote AutoConfigURL to %q through a poisoned backup", got)
+	}
+}
+
+// A backup with a non-URL Previous is not one of ours either.
+func TestBrowserDeactivateIgnoresPoisonedPrevious(t *testing.T) {
+	withTestRegistry(t)
+	dataDir := t.TempDir()
+	seedBackupFile(t, dataDir, `{"previous":"not a url","pacBase":"`+pacBaseURL()+`"}`)
+	writeTestAutoConfig(t, "http://corp.example/proxy.pac")
+
+	if err := deactivateBrowserPAC(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	if got := readTestAutoConfig(t); got != "http://corp.example/proxy.pac" {
+		t.Fatalf("deactivate rewrote AutoConfigURL to %q through a poisoned backup", got)
+	}
+}
+
+// A planted or corrupt backup file must not count as an install: it would
+// otherwise mark the browser configured and suppress stale-PAC cleanup.
+func TestBrowserConfiguredFalseForPlantedBackup(t *testing.T) {
+	dataDir := t.TempDir()
+	seedBackupFile(t, dataDir, `{"previous":"http://127.0.0.1:9/pac","pacBase":"h"}`)
+	if browserConfigured(dataDir) {
+		t.Fatal("browserConfigured accepted a backup this program could not have written")
+	}
+}
+
+// Install over a planted file must re-capture the real registry state and
+// overwrite the planted file with a valid backup.
+func TestBrowserInstallRecapturesOverPlantedBackup(t *testing.T) {
+	withTestRegistry(t)
+	dataDir := t.TempDir()
+	seedBackupFile(t, dataDir, `{"previous":"http://127.0.0.1:9/pac","pacBase":"h"}`)
+	writeTestAutoConfig(t, "http://corp.example/proxy.pac")
+
+	pac := pacURLFor("tok", time.Unix(1, 0))
+	if err := installBrowserPAC(dataDir, pac); err != nil {
+		t.Fatal(err)
+	}
+	if got := readTestAutoConfig(t); got != pac {
+		t.Fatalf("AutoConfigURL = %q, want %q", got, pac)
+	}
+	backup, ok, err := loadBrowserBackup(browserBackupPath(dataDir))
+	if err != nil || !ok {
+		t.Fatalf("backup not re-captured: ok=%v err=%v", ok, err)
+	}
+	if backup.Previous != "http://corp.example/proxy.pac" || backup.PACBase != pacBaseURL() {
+		t.Fatalf("re-captured backup = %+v, want previous corp PAC and our base", backup)
 	}
 }

@@ -5,7 +5,6 @@ package main
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -27,11 +26,11 @@ var refreshWinINET = func() {
 	_, _, _ = proc.Call(0, 37, 0, 0) // INTERNET_OPTION_REFRESH
 }
 
-type browserBackup struct {
-	Previous string `json:"previous"`
-	PACBase  string `json:"pacBase"`
-}
-
+// loadBrowserBackup returns the saved backup state. A file this program could
+// not have written — unparsable, planted with a foreign PACBase or a
+// non-URL Previous, or from an incompatible format — is reported as absent so
+// callers re-capture the real registry state instead of restoring attacker
+// content (the file is exe-adjacent and not trusted; see browser.go).
 func loadBrowserBackup(path string) (browserBackup, bool, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -40,9 +39,9 @@ func loadBrowserBackup(path string) (browserBackup, bool, error) {
 	if err != nil {
 		return browserBackup{}, false, err
 	}
-	var backup browserBackup
-	if err := json.Unmarshal(data, &backup); err != nil {
-		return browserBackup{}, false, fmt.Errorf("parse %s: %w", path, err)
+	backup, ok := parseBrowserBackup(data)
+	if !ok {
+		return browserBackup{}, false, nil
 	}
 	return backup, true, nil
 }
