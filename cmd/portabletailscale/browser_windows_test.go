@@ -321,13 +321,6 @@ func seedBackupFile(t *testing.T, dataDir, content string) {
 	}
 }
 
-func writeTestAutoConfig(t *testing.T, value string) {
-	t.Helper()
-	if err := writeAutoConfigURL(value); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func readTestAutoConfig(t *testing.T) string {
 	t.Helper()
 	value, err := readAutoConfigURL()
@@ -343,7 +336,7 @@ func TestBrowserDeactivateIgnoresPoisonedPACBase(t *testing.T) {
 	withTestRegistry(t)
 	dataDir := t.TempDir()
 	seedBackupFile(t, dataDir, `{"previous":"http://127.0.0.1:9/pac","pacBase":"h"}`)
-	writeTestAutoConfig(t, "http://corp.example/proxy.pac")
+	setTestAutoConfig(t, "http://corp.example/proxy.pac")
 
 	if err := deactivateBrowserPAC(dataDir); err != nil {
 		t.Fatal(err)
@@ -358,7 +351,7 @@ func TestBrowserDeactivateIgnoresPoisonedPrevious(t *testing.T) {
 	withTestRegistry(t)
 	dataDir := t.TempDir()
 	seedBackupFile(t, dataDir, `{"previous":"not a url","pacBase":"`+pacBaseURL()+`"}`)
-	writeTestAutoConfig(t, "http://corp.example/proxy.pac")
+	setTestAutoConfig(t, "http://corp.example/proxy.pac")
 
 	if err := deactivateBrowserPAC(dataDir); err != nil {
 		t.Fatal(err)
@@ -384,7 +377,7 @@ func TestBrowserInstallRecapturesOverPlantedBackup(t *testing.T) {
 	withTestRegistry(t)
 	dataDir := t.TempDir()
 	seedBackupFile(t, dataDir, `{"previous":"http://127.0.0.1:9/pac","pacBase":"h"}`)
-	writeTestAutoConfig(t, "http://corp.example/proxy.pac")
+	setTestAutoConfig(t, "http://corp.example/proxy.pac")
 
 	pac := pacURLFor("tok", time.Unix(1, 0))
 	if err := installBrowserPAC(dataDir, pac); err != nil {

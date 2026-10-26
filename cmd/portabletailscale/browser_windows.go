@@ -186,6 +186,9 @@ func readBrowserPrevious() (string, error) {
 
 func writeBrowserPrevious(value string) error {
 	key, err := registry.OpenKey(registry.CURRENT_USER, internetSettingsKeyPath, registry.QUERY_VALUE|registry.SET_VALUE)
+	if errors.Is(err, fs.ErrNotExist) && value == "" {
+		return nil // nothing to delete from a key that does not exist
+	}
 	if err != nil {
 		return err
 	}
