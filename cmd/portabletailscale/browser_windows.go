@@ -5,6 +5,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -33,22 +34,36 @@ var refreshWinINET = func() {
 	_, _, _ = proc.Call(0, 37, 0, 0) // INTERNET_OPTION_REFRESH
 }
 
-// loadBrowserBackup returns the saved backup state. A file this program could
-// not have written — unparsable, planted with a foreign PACBase or a
-// non-URL Previous, or from an incompatible format — is reported as absent so
-// callers re-capture the real registry state instead of restoring attacker
-// content. The file's Previous field is informational only; restores read
-// readBrowserPrevious instead (see the trust split above).
+// loadBrowserBackup returns the saved backup state. The read is bounded;
+// a file this program could not have written — unparsable, planted with a
+// foreign PACBase or a non-URL Previous, oversized, or from an incompatible
+// format — is removed (best effort) and reported as absent so callers
+// re-capture the real registry state or clean up instead of restoring
+// attacker content. The file's Previous field is informational only;
+// restores read readBrowserPrevious (see the trust split above). Pre-HKCU
+// backups' Previous never restores; the first deactivate after upgrade
+// clears fail-safe — migrating it would make the plantable file a restore
+// source again.
 func loadBrowserBackup(path string) (browserBackup, bool, error) {
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return browserBackup{}, false, nil
 	}
 	if err != nil {
 		return browserBackup{}, false, err
 	}
-	backup, ok := parseBrowserBackup(data)
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, browserBackupMaxSize+1))
+	if err != nil {
+		return browserBackup{}, false, err
+	}
+	var backup browserBackup
+	var ok bool
+	if len(data) <= browserBackupMaxSize {
+		backup, ok = parseBrowserBackup(data)
+	}
 	if !ok {
+		_ = os.Remove(path) // an invalid file must not linger or suppress cleanup
 		return browserBackup{}, false, nil
 	}
 	return backup, true, nil
@@ -159,6 +174,27 @@ func writeBrowserPrevious(value string) error {
 	return key.SetStringValue(portableTailscalePreviousValue, value)
 }
 
+func isOurPACURL(current string) bool {
+	return strings.HasPrefix(current, pacBaseURL())
+}
+
+// clearOurPAC clears AutoConfigURL when it currently points at this
+// program's PAC; a foreign setting is never touched.
+func clearOurPAC() error {
+	current, err := readAutoConfigURL()
+	if err != nil {
+		return err
+	}
+	if !isOurPACURL(current) {
+		return nil
+	}
+	if err := writeAutoConfigURL(""); err != nil {
+		return err
+	}
+	refreshWinINET()
+	return nil
+}
+
 func installBrowserPAC(dataDir, pacURL string) error {
 	if dataDir == "" {
 		return errors.New("no data directory")
@@ -175,13 +211,17 @@ func installBrowserPAC(dataDir, pacURL string) error {
 	}
 	if !exists {
 		backup = browserBackup{PACBase: pacBaseURL()}
-		if current != "" && !strings.HasPrefix(current, backup.PACBase) {
+		if current != "" && !isOurPACURL(current) {
+			// The registry is the trusted per-user hive: store a captured
+			// foreign prior verbatim — including shapes the file field
+			// filters, like file:// — so deactivate can always put it back.
+			// With an empty or ours current (upgrade-over or corrupt-file
+			// reinstall) the stored value stays untouched: destroying the
+			// only restore copy would be unrecoverable.
+			if err := writeBrowserPrevious(current); err != nil {
+				return err
+			}
 			backup.Previous = storablePrevious(current)
-		}
-		// The registry value is the restore authority; the file field is a
-		// copy for inspection. An existing backup keeps its stored value.
-		if err := writeBrowserPrevious(backup.Previous); err != nil {
-			return err
 		}
 		if err := saveBrowserBackup(path, backup); err != nil {
 			return err
@@ -218,7 +258,7 @@ func reactivateBrowserPAC(dataDir, pacURL string) error {
 		return err
 	}
 
-	ours := strings.HasPrefix(current, backup.PACBase)
+	ours := isOurPACURL(current)
 	restored := current == previous
 	if !ours && !restored {
 		return nil
@@ -232,21 +272,25 @@ func reactivateBrowserPAC(dataDir, pacURL string) error {
 
 // deactivateBrowserPAC puts the previous proxy setting back when the program
 // exits. The file only proves the PAC is ours (PACBase); the value restored
-// comes from HKCU, which no other local principal can plant. The backup
-// stays so the next run can reactivate it.
+// comes from HKCU, which no other local principal can plant. Without a
+// usable backup (missing or invalid-removed) our PAC is still cleared so it
+// cannot go stale. The backup stays so the next run can reactivate it.
 func deactivateBrowserPAC(dataDir string) error {
 	if dataDir == "" {
 		return nil
 	}
-	backup, exists, err := loadBrowserBackup(browserBackupPath(dataDir))
-	if err != nil || !exists || backup.PACBase == "" {
+	_, exists, err := loadBrowserBackup(browserBackupPath(dataDir))
+	if err != nil {
 		return err
+	}
+	if !exists {
+		return clearOurPAC()
 	}
 	current, err := readAutoConfigURL()
 	if err != nil {
 		return err
 	}
-	if !strings.HasPrefix(current, backup.PACBase) {
+	if !isOurPACURL(current) {
 		return nil
 	}
 	previous, err := readBrowserPrevious()
@@ -275,18 +319,7 @@ func clearOrphanPAC(dataDir string) error {
 	if browserConfigured(dataDir) {
 		return nil // deactivateBrowserPAC handles the backed-up case
 	}
-	current, err := readAutoConfigURL()
-	if err != nil {
-		return err
-	}
-	if !strings.HasPrefix(current, pacBaseURL()) {
-		return nil
-	}
-	if err := writeAutoConfigURL(""); err != nil {
-		return err
-	}
-	refreshWinINET()
-	return nil
+	return clearOurPAC()
 }
 
 func uninstallBrowserPAC(dataDir string) error {
@@ -298,26 +331,25 @@ func uninstallBrowserPAC(dataDir string) error {
 	if err != nil {
 		return err
 	}
+
+	if !exists {
+		// No usable backup: still clear our PAC and drop any leftover
+		// restore value so nothing half-migrates later.
+		if err := clearOurPAC(); err != nil {
+			return err
+		}
+		return writeBrowserPrevious("")
+	}
+
 	current, err := readAutoConfigURL()
 	if err != nil {
 		return err
 	}
 
-	if !exists {
-		if strings.HasPrefix(current, pacBaseURL()) {
-			if err := writeAutoConfigURL(""); err != nil {
-				return err
-			}
-			refreshWinINET()
-		}
-		return nil
-	}
-
 	if backup.PACBase == "" {
 		return nil
 	}
-	ours := strings.HasPrefix(current, backup.PACBase)
-	if ours {
+	if isOurPACURL(current) {
 		previous, err := readBrowserPrevious()
 		if err != nil {
 			return err

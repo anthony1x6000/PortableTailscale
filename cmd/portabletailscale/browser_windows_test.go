@@ -441,10 +441,10 @@ func TestBrowserDeactivateRestoresRegistryPrevious(t *testing.T) {
 	}
 }
 
-// Capture/load symmetry: a current AutoConfigURL the validator refuses to
-// restore (file:// is legit for WinINET but not restorable by us) is stored
-// as empty, so a later deactivate clears instead of failing to restore.
-func TestBrowserInstallStoresUnstorablePreviousAsEmpty(t *testing.T) {
+// The registry is the trusted per-user hive: a prior WinINET accepts but
+// validPreviousURL refuses (file://) is captured verbatim there so restore
+// always works; the informational file field still filters it to empty.
+func TestBrowserInstallStoresFileURLPreviousVerbatim(t *testing.T) {
 	withTestRegistry(t)
 	dataDir := t.TempDir()
 	setTestAutoConfig(t, "file:///C:/something")
@@ -456,22 +456,22 @@ func TestBrowserInstallStoresUnstorablePreviousAsEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if previous != "" {
-		t.Fatalf("registry Previous = %q, want empty", previous)
+	if previous != "file:///C:/something" {
+		t.Fatalf("registry Previous = %q, want the file:// prior verbatim", previous)
 	}
 	backup, ok, err := loadBrowserBackup(browserBackupPath(dataDir))
 	if err != nil || !ok {
 		t.Fatalf("backup: ok=%v err=%v", ok, err)
 	}
 	if backup.Previous != "" {
-		t.Fatalf("backup Previous = %q, want empty", backup.Previous)
+		t.Fatalf("file Previous = %q, want the filtered empty copy", backup.Previous)
 	}
 
 	if err := deactivateBrowserPAC(dataDir); err != nil {
 		t.Fatal(err)
 	}
-	if got := readTestAutoConfig(t); got != "" {
-		t.Fatalf("AutoConfigURL = %q, want cleared", got)
+	if got := readTestAutoConfig(t); got != "file:///C:/something" {
+		t.Fatalf("AutoConfigURL = %q, want the file:// prior restored", got)
 	}
 }
 
@@ -481,5 +481,102 @@ func TestBrowserConfiguredFalseForOversizedBackup(t *testing.T) {
 	seedBackupFile(t, dataDir, `{"previous":"","pacBase":"`+pacBaseURL()+`"}`+strings.Repeat(" ", 5000))
 	if browserConfigured(dataDir) {
 		t.Fatal("browserConfigured accepted an oversized backup file")
+	}
+}
+
+// An invalid backup is not a reason to leave our PAC installed: deactivate
+// still clears it and removes the unusable file.
+func TestBrowserDeactivateCleansOurPACWhenBackupInvalid(t *testing.T) {
+	withTestRegistry(t)
+	dataDir := t.TempDir()
+	seedBackupFile(t, dataDir, "{not json")
+	setTestAutoConfig(t, pacURLFor("tok", time.Unix(1, 0)))
+
+	if err := deactivateBrowserPAC(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	if got := readTestAutoConfig(t); got != "" {
+		t.Fatalf("AutoConfigURL = %q, want our PAC cleared", got)
+	}
+	if _, err := os.Stat(browserBackupPath(dataDir)); !os.IsNotExist(err) {
+		t.Fatal("invalid backup file was not removed")
+	}
+}
+
+// Uninstall with an invalid backup: our PAC cleared, registry Previous
+// deleted, file removed.
+func TestBrowserUninstallCleansWhenBackupInvalid(t *testing.T) {
+	withTestRegistry(t)
+	dataDir := t.TempDir()
+	seedBackupFile(t, dataDir, "{not json")
+	if err := writeBrowserPrevious("http://corp.example/proxy.pac"); err != nil {
+		t.Fatal(err)
+	}
+	setTestAutoConfig(t, pacURLFor("tok", time.Unix(1, 0)))
+
+	if err := uninstallBrowserPAC(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	if got := readTestAutoConfig(t); got != "" {
+		t.Fatalf("AutoConfigURL = %q, want our PAC cleared", got)
+	}
+	if previous, err := readBrowserPrevious(); err != nil || previous != "" {
+		t.Fatalf("registry Previous = %q, %v, want deleted", previous, err)
+	}
+	if _, err := os.Stat(browserBackupPath(dataDir)); !os.IsNotExist(err) {
+		t.Fatal("invalid backup file was not removed")
+	}
+}
+
+// Corrupting the exe-adjacent file must not destroy the restore value:
+// install over an ours current leaves the stored registry Previous alone.
+func TestBrowserInstallPreservesRegistryPreviousWhenCurrentIsOurs(t *testing.T) {
+	withTestRegistry(t)
+	dataDir := t.TempDir()
+	seedBackupFile(t, dataDir, "{not json")
+	if err := writeBrowserPrevious("http://corp.example/proxy.pac"); err != nil {
+		t.Fatal(err)
+	}
+	setTestAutoConfig(t, pacURLFor("tok", time.Unix(1, 0)))
+
+	if err := installBrowserPAC(dataDir, pacURLFor("tok", time.Unix(2, 0))); err != nil {
+		t.Fatal(err)
+	}
+	if previous, err := readBrowserPrevious(); err != nil || previous != "http://corp.example/proxy.pac" {
+		t.Fatalf("registry Previous = %q, %v, want preserved", previous, err)
+	}
+}
+
+// An oversized file is treated as absent: loadBrowserBackup reports it so
+// and removes it, then install re-captures over it.
+func TestBrowserOversizedBackupTreatedAsAbsent(t *testing.T) {
+	withTestRegistry(t)
+	dataDir := t.TempDir()
+	seedBackupFile(t, dataDir, `{"previous":"","pacBase":"`+pacBaseURL()+`"}`+strings.Repeat(" ", 5000))
+	setTestAutoConfig(t, "http://corp.example/proxy.pac")
+
+	if _, ok, err := loadBrowserBackup(browserBackupPath(dataDir)); err != nil || ok {
+		t.Fatalf("oversized backup reported ok=%v err=%v, want absent", ok, err)
+	}
+	if _, err := os.Stat(browserBackupPath(dataDir)); !os.IsNotExist(err) {
+		t.Fatal("oversized backup file was not removed")
+	}
+
+	pac := pacURLFor("tok", time.Unix(1, 0))
+	if err := installBrowserPAC(dataDir, pac); err != nil {
+		t.Fatal(err)
+	}
+	if got := readTestAutoConfig(t); got != pac {
+		t.Fatalf("AutoConfigURL = %q, want re-captured install %q", got, pac)
+	}
+	backup, ok, err := loadBrowserBackup(browserBackupPath(dataDir))
+	if err != nil || !ok {
+		t.Fatalf("backup not re-captured: ok=%v err=%v", ok, err)
+	}
+	if backup.Previous != "http://corp.example/proxy.pac" {
+		t.Fatalf("re-captured previous = %q", backup.Previous)
+	}
+	if previous, err := readBrowserPrevious(); err != nil || previous != "http://corp.example/proxy.pac" {
+		t.Fatalf("registry Previous = %q, %v, want re-captured", previous, err)
 	}
 }

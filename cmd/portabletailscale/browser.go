@@ -44,10 +44,10 @@ func validBrowserBackup(b browserBackup) bool {
 	return b.Previous == "" || validPreviousURL(b.Previous)
 }
 
-// storablePrevious keeps capture/load symmetric: only a value the validator
-// would restore is stored; anything else (e.g. a file:// URL WinINET accepts
-// but validPreviousURL refuses) is stored empty so a later deactivate clears
-// instead of loading as absent and never restoring.
+// storablePrevious filters a captured prior for the informational file
+// field: only a value validPreviousURL accepts is written there, anything
+// else (e.g. a file:// URL WinINET accepts) is written empty. The registry —
+// the restore authority — keeps the prior verbatim.
 func storablePrevious(v string) string {
 	if v == "" || validPreviousURL(v) {
 		return v
