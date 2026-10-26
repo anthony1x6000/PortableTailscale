@@ -285,26 +285,26 @@ func reactivateBrowserPAC(dataDir, pacURL string) error {
 	}
 	// An unreadable marker counts as absent, so a squatted or locked file
 	// cannot suppress reactivation; installBrowserPAC re-captures instead.
-	backup, exists, _ := loadBrowserBackup(browserBackupPath(dataDir))
+	// The marker's contents are not consulted: a valid one always carries
+	// our PACBase, and the prior comes from HKCU.
+	_, exists, _ := loadBrowserBackup(browserBackupPath(dataDir))
 	if !exists {
 		return installBrowserPAC(dataDir, pacURL)
-	}
-	if backup.PACBase == "" {
-		return nil
 	}
 	current, err := readAutoConfigURL()
 	if err != nil {
 		return err
 	}
-	previous, err := readBrowserPrevious()
-	if err != nil {
-		return err
-	}
-
-	ours := isOurPACURL(current)
-	restored := current == previous
-	if !ours && !restored {
-		return nil
+	if !isOurPACURL(current) {
+		// Only rewrite a setting that is ours or already restored to ours;
+		// a foreign one is the user's or another product's.
+		previous, err := readBrowserPrevious()
+		if err != nil {
+			return err
+		}
+		if current != previous {
+			return nil
+		}
 	}
 	if err := writeAutoConfigURL(pacURL); err != nil {
 		return err
