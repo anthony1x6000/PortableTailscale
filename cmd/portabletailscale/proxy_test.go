@@ -391,3 +391,15 @@ func TestProxyPACRejectsWrongToken(t *testing.T) {
 		t.Fatalf("status = %d, want 403", resp.StatusCode)
 	}
 }
+
+func TestNewPACTokenFailsClosedOnShortRead(t *testing.T) {
+	old := randRead
+	randRead = func(b []byte) (int, error) { return copy(b, "short"), nil }
+	defer func() { randRead = old }()
+	defer func() {
+		if recover() == nil {
+			t.Fatal("newPACtoken must fail closed on a short crypto read, not mint a partially-filled token")
+		}
+	}()
+	_ = newPACtoken()
+}

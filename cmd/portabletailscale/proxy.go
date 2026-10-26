@@ -54,7 +54,11 @@ var randRead = rand.Read
 // even if randRead is ever swapped).
 func newPACtoken() string {
 	var buf [16]byte
-	if _, err := randRead(buf[:]); err != nil {
+	n, err := randRead(buf[:])
+	if err == nil && n != len(buf) {
+		err = fmt.Errorf("short read: %d of %d bytes", n, len(buf))
+	}
+	if err != nil {
 		panic("PortableTailscale: crypto source unavailable for PAC token: " + err.Error())
 	}
 	return hex.EncodeToString(buf[:])
