@@ -44,10 +44,18 @@ func pacURLFor(token string, now time.Time) string {
 	return fmt.Sprintf("%s?t=%s&v=%d", pacBaseURL(), token, now.UnixNano())
 }
 
+// randRead is a seam so tests can simulate an unavailable crypto source.
+var randRead = rand.Read
+
+// newPACtoken mints the per-run PAC bearer token. The token gates peer-list
+// disclosure, so a crypto-source failure is fatal rather than degraded to a
+// guessable value (crypto/rand itself crashes rather than erroring on all
+// toolchains this module supports; the explicit panic keeps that contract
+// even if randRead is ever swapped).
 func newPACtoken() string {
 	var buf [16]byte
-	if _, err := rand.Read(buf[:]); err != nil {
-		return strconv.FormatInt(time.Now().UnixNano(), 16)
+	if _, err := randRead(buf[:]); err != nil {
+		panic("PortableTailscale: crypto source unavailable for PAC token: " + err.Error())
 	}
 	return hex.EncodeToString(buf[:])
 }

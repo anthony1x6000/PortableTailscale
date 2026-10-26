@@ -348,3 +348,46 @@ func rawConnectNoFail(t *testing.T, proxyAddr, target string) (net.Conn, *bufio.
 	}
 	return conn, reader, code
 }
+
+func TestNewPACTokenFailsClosedWhenRandUnavailable(t *testing.T) {
+	old := randRead
+	randRead = func(b []byte) (int, error) { return 0, fmt.Errorf("boom") }
+	defer func() { randRead = old }()
+	defer func() {
+		if recover() == nil {
+			t.Fatal("newPACtoken must fail closed (panic) when the crypto source errors, not mint a guessable timestamp token")
+		}
+	}()
+	_ = newPACtoken()
+}
+
+func TestNewPACTokenShape(t *testing.T) {
+	tok := newPACtoken()
+	if len(tok) != 32 {
+		t.Fatalf("token length = %d, want 32", len(tok))
+	}
+	for _, c := range tok {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			t.Fatalf("token %q contains non-lowercase-hex character %q", tok, string(c))
+		}
+	}
+}
+
+func TestProxyPACRejectsWrongToken(t *testing.T) {
+	server := testProxy(t, func(context.Context, string, string) (net.Conn, error) {
+		return nil, fmt.Errorf("unexpected dial")
+	}, peerList{})
+
+	req, err := http.NewRequest(http.MethodGet, server.URL+"/proxy.pac?t="+strings.Repeat("0", 32), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+}
