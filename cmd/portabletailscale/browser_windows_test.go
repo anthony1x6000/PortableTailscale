@@ -725,3 +725,102 @@ func TestIsOurPACURLRequiresBoundary(t *testing.T) {
 	}
 }
 
+// With no usable marker but a trusted prior in HKCU, the orphan clear
+// restores the prior instead of blanking the user's setting.
+func TestClearOrphanPACRestoresRegistryPrevious(t *testing.T) {
+	withTestRegistry(t)
+	dataDir := t.TempDir()
+	seedBackupFile(t, dataDir, "{not json") // unusable: purged, not a backup
+	if err := writeBrowserPrevious("http://corp.example/proxy.pac"); err != nil {
+		t.Fatal(err)
+	}
+	setTestAutoConfig(t, pacURLFor("tok", time.Unix(1, 0)))
+
+	if err := clearOrphanPAC(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	if got := readTestAutoConfig(t); got != "http://corp.example/proxy.pac" {
+		t.Fatalf("AutoConfigURL = %q, want the trusted prior restored", got)
+	}
+}
+
+// A marker path squatted by a directory must not block the PAC install.
+func TestBrowserInstallSurvivesSquattedMarker(t *testing.T) {
+	withTestRegistry(t)
+	dataDir := t.TempDir()
+	if err := os.MkdirAll(browserBackupPath(dataDir), 0700); err != nil {
+		t.Fatal(err)
+	}
+	setTestAutoConfig(t, "http://corp.example/proxy.pac")
+
+	pac := pacURLFor("tok", time.Unix(1, 0))
+	if err := installBrowserPAC(dataDir, pac); err != nil {
+		t.Fatalf("install blocked by a squatted marker: %v", err)
+	}
+	if got := readTestAutoConfig(t); got != pac {
+		t.Fatalf("AutoConfigURL = %q, want %q", got, pac)
+	}
+	if previous, err := readBrowserPrevious(); err != nil || previous != "http://corp.example/proxy.pac" {
+		t.Fatalf("registry Previous = %q, %v, want the prior captured", previous, err)
+	}
+}
+
+// Reactivation must not be suppressed by an unreadable marker either.
+func TestBrowserReactivateToleratesUnreadableMarker(t *testing.T) {
+	withTestRegistry(t)
+	dataDir := t.TempDir()
+	if err := os.MkdirAll(browserBackupPath(dataDir), 0700); err != nil {
+		t.Fatal(err)
+	}
+	setTestAutoConfig(t, "http://corp.example/proxy.pac")
+
+	pac := pacURLFor("tok", time.Unix(1, 0))
+	if err := reactivateBrowserPAC(dataDir, pac); err != nil {
+		t.Fatalf("reactivation blocked by an unreadable marker: %v", err)
+	}
+	if got := readTestAutoConfig(t); got != pac {
+		t.Fatalf("AutoConfigURL = %q, want %q", got, pac)
+	}
+}
+
+// Our own marker must stay readable: a prior long enough to push the file
+// past the bound its readers enforce drops the informational copy instead of
+// growing past it, while HKCU keeps the prior verbatim for the restore.
+func TestBrowserInstallDropsOversizedPreviousFromMarker(t *testing.T) {
+	withTestRegistry(t)
+	dataDir := t.TempDir()
+	long := "http://corp.example/" + strings.Repeat("a", 5000)
+	setTestAutoConfig(t, long)
+
+	if err := installBrowserPAC(dataDir, pacURLFor("tok", time.Unix(1, 0))); err != nil {
+		t.Fatal(err)
+	}
+	if previous, err := readBrowserPrevious(); err != nil || previous != long {
+		t.Fatalf("registry Previous was not captured verbatim")
+	}
+	backup, ok, err := loadBrowserBackup(browserBackupPath(dataDir))
+	if err != nil || !ok {
+		t.Fatalf("our own marker became unreadable: ok=%v err=%v", ok, err)
+	}
+	if backup.Previous != "" {
+		t.Fatalf("marker kept a %d-byte previous, want it dropped", len(backup.Previous))
+	}
+
+	if err := deactivateBrowserPAC(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	if got := readTestAutoConfig(t); got != long {
+		t.Fatalf("deactivate did not restore the long prior")
+	}
+}
+
+// A marker this program could write is accepted as an install; the shape is
+// what "configured" means (deactivate no longer depends on it at all).
+func TestBrowserConfiguredAcceptsOwnMarker(t *testing.T) {
+	dataDir := t.TempDir()
+	seedBackupFile(t, dataDir, `{"previous":"","pacBase":"`+pacBaseURL()+`"}`)
+	if !browserConfigured(dataDir) {
+		t.Fatal("a marker this program writes was rejected as not configured")
+	}
+}
+

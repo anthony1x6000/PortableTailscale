@@ -83,6 +83,14 @@ func saveBrowserBackup(path string, backup browserBackup) error {
 	if err != nil {
 		return err
 	}
+	if len(data) > browserBackupMaxSize {
+		// Previous is informational and never restored from, so drop it
+		// rather than write a file our own readers reject as oversized.
+		data, err = json.MarshalIndent(browserBackup{PACBase: backup.PACBase}, "", "  ")
+		if err != nil {
+			return err
+		}
+	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
@@ -148,9 +156,11 @@ func writeAutoConfigURL(value string) error {
 }
 
 // readBrowserPrevious returns the trusted prior AutoConfigURL, or "" when
-// there is none. A value that cannot be read as a string (wrong type, or a
-// corrupt entry) counts as none: it is not a prior this program wrote, and
-// failing here would wedge every later install/deactivate/uninstall.
+// there is none. An absent value and a value we did not write as a string
+// (wrong type, corrupt entry) both count as none — the latter is not a prior
+// and must not wedge later install/deactivate/uninstall. A genuine read
+// failure is still an error: it means we cannot know the prior, which the
+// callers must not paper over by clearing the user's setting.
 func readBrowserPrevious() (string, error) {
 	key, err := registry.OpenKey(registry.CURRENT_USER, internetSettingsKeyPath, registry.QUERY_VALUE)
 	if err != nil {
@@ -161,14 +171,18 @@ func readBrowserPrevious() (string, error) {
 	}
 	defer key.Close()
 
-	value, _, err := key.GetStringValue(portableTailscalePreviousValue)
+	value, valType, err := key.GetValue(portableTailscalePreviousValue)
 	if errors.Is(err, fs.ErrNotExist) {
 		return "", nil
 	}
 	if err != nil {
+		return "", err
+	}
+	if valType != registry.SZ {
 		return "", nil
 	}
-	return value, nil
+	prior, _ := value.(string)
+	return prior, nil
 }
 
 func writeBrowserPrevious(value string) error {
@@ -193,23 +207,6 @@ func writeBrowserPrevious(value string) error {
 func isOurPACURL(current string) bool {
 	rest, ok := strings.CutPrefix(current, pacBaseURL())
 	return ok && (rest == "" || rest[0] == '?')
-}
-
-// clearOurPAC clears AutoConfigURL when it currently points at this
-// program's PAC; a foreign setting is never touched.
-func clearOurPAC() error {
-	current, err := readAutoConfigURL()
-	if err != nil {
-		return err
-	}
-	if !isOurPACURL(current) {
-		return nil
-	}
-	if err := writeAutoConfigURL(""); err != nil {
-		return err
-	}
-	refreshWinINET()
-	return nil
 }
 
 // restoreBrowserPrevious puts the trusted prior AutoConfigURL back: the HKCU
@@ -266,9 +263,11 @@ func installBrowserPAC(dataDir, pacURL string) error {
 		prior = storablePrevious(current)
 	}
 	if !exists {
-		if err := saveBrowserBackup(path, browserBackup{PACBase: pacBaseURL(), Previous: prior}); err != nil {
-			return err
-		}
+		// Persisting the marker is best effort too: a path squatted by a
+		// directory or held open must not block the PAC install. The restore
+		// authority is HKCU, so a missing marker cannot lose the prior.
+		_ = os.Remove(path)
+		_ = saveBrowserBackup(path, browserBackup{PACBase: pacBaseURL(), Previous: prior})
 	}
 
 	if err := writeAutoConfigURL(pacURL); err != nil {
@@ -282,10 +281,9 @@ func reactivateBrowserPAC(dataDir, pacURL string) error {
 	if dataDir == "" {
 		return nil
 	}
-	backup, exists, err := loadBrowserBackup(browserBackupPath(dataDir))
-	if err != nil {
-		return err
-	}
+	// An unreadable marker counts as absent, so a squatted or locked file
+	// cannot suppress reactivation; installBrowserPAC re-captures instead.
+	backup, exists, _ := loadBrowserBackup(browserBackupPath(dataDir))
 	if !exists {
 		return installBrowserPAC(dataDir, pacURL)
 	}
@@ -335,18 +333,30 @@ func deactivateBrowserPAC(dataDir string) error {
 	return restoreBrowserPrevious()
 }
 
-// clearOrphanPAC removes a PAC that points at this program's loopback proxy
+// clearOrphanPAC retires a PAC that points at this program's loopback proxy
 // when no backup exists beside the executable — left behind by an install
 // from a different directory whose backup this one cannot restore from.
 // Leaving it would keep browsers (and tailscale's own control client, via
-// winhttp) pointed at a dead port. Only this program's PAC base is touched;
-// a concurrently running instance would need to re-install its PAC, but the
-// alternative is a permanently stale setting.
+// winhttp) pointed at a dead port. The trusted prior is restored, not
+// blanked: HKCU still holds the user's real setting even when this
+// directory's marker is gone. A concurrently running instance would need to
+// re-install its PAC, but the alternative is a permanently stale setting.
+//
+// This runs after main's deactivateBrowserPAC, which already restored (or
+// cleared) our PAC without consulting the marker; the browserConfigured gate
+// only skips the redundant restore for an install this directory owns.
 func clearOrphanPAC(dataDir string) error {
 	if browserConfigured(dataDir) {
-		return nil // deactivateBrowserPAC handles the backed-up case
+		return nil
 	}
-	return clearOurPAC()
+	current, err := readAutoConfigURL()
+	if err != nil {
+		return err
+	}
+	if !isOurPACURL(current) {
+		return nil // never touch a foreign setting
+	}
+	return restoreBrowserPrevious()
 }
 
 // uninstallBrowserPAC restores the prior setting from HKCU, drops the
