@@ -16,7 +16,7 @@ func deactivateBrowserPAC(dataDir string) error {
 	return nil
 }
 
-func clearOrphanPAC(dataDir string) error {
+func clearOrphanPAC() error {
 	return nil
 }
 

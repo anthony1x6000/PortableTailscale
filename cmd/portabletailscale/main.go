@@ -226,12 +226,12 @@ func run(opts options) int {
 	if dataErr == nil {
 		_ = deactivateBrowserPAC(dataDir)
 	}
-	// A PAC can also be orphaned by an install from a different directory,
-	// whose backup this executable cannot see; clear that too. Only with a
-	// usable data directory: without one there is no way to tell a restorable
-	// PAC from an orphan.
+	// A PAC can also be orphaned by an install from a different directory.
+	// That needs no data directory: the restore comes from HKCU, not from a
+	// marker here. This retries the restore above if it failed (its error is
+	// discarded) and covers the other-directory case.
 	if dataErr == nil {
-		_ = clearOrphanPAC(dataDir)
+		_ = clearOrphanPAC()
 	}
 	sshPath, sshErr := sshConfigPath()
 	needHTTPProxy := opts.install ||
