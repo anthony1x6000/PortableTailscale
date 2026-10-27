@@ -280,34 +280,68 @@ func TestBrowserReactivateIgnoresForeignPAC(t *testing.T) {
 
 func TestClearOrphanPAC(t *testing.T) {
 	withTestRegistry(t)
-	dataDir := t.TempDir() // no backup here: the orphan case
 
+	// A foreign setting is never touched.
 	setTestAutoConfig(t, "http://corp.example/proxy.pac")
-	if err := clearOrphanPAC(dataDir); err != nil {
+	if err := clearOrphanPAC(); err != nil {
 		t.Fatal(err)
 	}
 	if current, err := readAutoConfigURL(); err != nil || current != "http://corp.example/proxy.pac" {
 		t.Fatalf("foreign PAC was modified: %q, %v", current, err)
 	}
 
+	// An orphaned PAC with no prior is cleared: it points at a dead port.
 	setTestAutoConfig(t, pacBaseURL()+"?t=stale&v=1")
-	if err := clearOrphanPAC(dataDir); err != nil {
+	if err := clearOrphanPAC(); err != nil {
 		t.Fatal(err)
 	}
 	if current, err := readAutoConfigURL(); err != nil || current != "" {
 		t.Fatalf("orphaned PAC was not cleared: %q, %v", current, err)
 	}
 
-	// With a local backup the restore belongs to deactivateBrowserPAC.
+	// A live, backed-up install is restored rather than skipped: the marker
+	// is not consulted, so it cannot leave a stale PAC alive.
+	dataDir := t.TempDir()
+	setTestAutoConfig(t, "http://corp.example/proxy.pac")
 	if err := installBrowserPAC(dataDir, pacURLFor("tok", time.Unix(1, 0))); err != nil {
 		t.Fatal(err)
 	}
-	setTestAutoConfig(t, pacBaseURL()+"?t=live&v=2")
-	if err := clearOrphanPAC(dataDir); err != nil {
+	if err := clearOrphanPAC(); err != nil {
 		t.Fatal(err)
 	}
-	if current, err := readAutoConfigURL(); err != nil || current != pacBaseURL()+"?t=live&v=2" {
-		t.Fatalf("backed-up PAC was touched by the orphan clear: %q, %v", current, err)
+	if got := readTestAutoConfig(t); got != "http://corp.example/proxy.pac" {
+		t.Fatalf("AutoConfigURL = %q, want the trusted prior restored", got)
+	}
+}
+
+// A well-formed planted marker must not suppress the orphan cleanup: a local
+// writer cannot keep a stale loopback PAC alive by planting a marker of the
+// right shape.
+func TestClearOrphanPACIgnoresWellFormedPlantedMarker(t *testing.T) {
+	withTestRegistry(t)
+	dataDir := t.TempDir()
+	seedBackupFile(t, dataDir, `{"previous":"","pacBase":"`+pacBaseURL()+`"}`) // planted, plausible
+	setTestAutoConfig(t, pacBaseURL()+"?t=stale&v=1")
+
+	if err := clearOrphanPAC(); err != nil {
+		t.Fatal(err)
+	}
+	if got := readTestAutoConfig(t); got != "" {
+		t.Fatalf("planted marker suppressed cleanup, stale PAC left alive: %q", got)
+	}
+
+	// Same, with the marker claiming a foreign prior to bait a restore. The
+	// current setting must be ours for a cleanup to apply at all.
+	seedBackupFile(t, dataDir, `{"previous":"http://attacker.example/proxy.pac","pacBase":"`+pacBaseURL()+`"}`)
+	if err := writeBrowserPrevious("http://corp.example/proxy.pac"); err != nil {
+		t.Fatal(err)
+	}
+	setTestAutoConfig(t, pacBaseURL()+"?t=stale&v=1")
+	if err := clearOrphanPAC(); err != nil {
+		t.Fatal(err)
+	}
+	if got := readTestAutoConfig(t); got != "http://corp.example/proxy.pac" {
+		t.Fatalf("AutoConfigURL = %q, want the trusted HKCU prior", got)
 	}
 }
 
@@ -361,8 +395,8 @@ func TestBrowserDeactivateIgnoresPoisonedPrevious(t *testing.T) {
 	}
 }
 
-// A planted or corrupt backup file must not count as an install: it would
-// otherwise mark the browser configured and suppress stale-PAC cleanup.
+// A marker this program could not have written is not an install of ours: it
+// must not make the program treat the browser as configured for refresh.
 func TestBrowserConfiguredFalseForPlantedBackup(t *testing.T) {
 	dataDir := t.TempDir()
 	seedBackupFile(t, dataDir, `{"previous":"http://127.0.0.1:9/pac","pacBase":"h"}`)
@@ -729,7 +763,7 @@ func TestClearOrphanPACRestoresRegistryPrevious(t *testing.T) {
 	}
 	setTestAutoConfig(t, pacURLFor("tok", time.Unix(1, 0)))
 
-	if err := clearOrphanPAC(dataDir); err != nil {
+	if err := clearOrphanPAC(); err != nil {
 		t.Fatal(err)
 	}
 	if got := readTestAutoConfig(t); got != "http://corp.example/proxy.pac" {

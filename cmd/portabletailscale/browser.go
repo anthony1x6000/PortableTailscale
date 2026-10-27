@@ -74,10 +74,14 @@ func browserBackupPath(dataDir string) string {
 // real backup is a few hundred bytes.
 const browserBackupMaxSize = 4096
 
-// browserConfigured reports whether a browser install this program recognizes
-// exists. A backup file only counts when it is one we could have written;
-// a planted, corrupt, or oversized file must not mark an install (it would
-// otherwise suppress stale-PAC cleanup) — install re-captures over it instead.
+// browserConfigured reports whether this directory looks like it has a browser
+// install of ours, based on the marker file. That file is plantable, so the
+// answer is advisory: it only decides whether this program treats the install
+// as its own — whether to refresh a PAC. It never gates a restore or a
+// cleanup; those decide from the current AutoConfigURL and the per-user HKCU
+// prior, so a planted marker cannot preserve or resurrect a setting.
+// A file we could not have written (malformed, corrupt, oversized) does not
+// count, and install re-captures over it.
 func browserConfigured(dataDir string) bool {
 	if dataDir == "" {
 		return false

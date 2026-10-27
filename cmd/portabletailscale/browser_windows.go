@@ -336,21 +336,18 @@ func deactivateBrowserPAC(dataDir string) error {
 }
 
 // clearOrphanPAC retires a PAC that points at this program's loopback proxy
-// when no backup exists beside the executable — left behind by an install
-// from a different directory whose backup this one cannot restore from.
-// Leaving it would keep browsers (and tailscale's own control client, via
-// winhttp) pointed at a dead port. The trusted prior is restored, not
-// blanked: HKCU still holds the user's real setting even when this
-// directory's marker is gone. A concurrently running instance would need to
-// re-install its PAC, but the alternative is a permanently stale setting.
+// but cannot belong to a live install here — typically left by an install from
+// another directory. Leaving it would keep browsers (and tailscale's own
+// control client, via winhttp) pointed at a dead port. The trusted prior is
+// restored rather than blanked: HKCU is per-user, so it holds the user's real
+// setting no matter which directory installed the PAC.
 //
-// This runs after main's deactivateBrowserPAC, which already restored (or
-// cleared) our PAC without consulting the marker; the browserConfigured gate
-// only skips the redundant restore for an install this directory owns.
-func clearOrphanPAC(dataDir string) error {
-	if browserConfigured(dataDir) {
-		return nil
-	}
+// The marker beside the executable is deliberately not consulted. It is
+// plantable, so it must never decide whether cleanup happens — only the
+// current AutoConfigURL does, and a foreign setting is never touched. This
+// runs after main's deactivateBrowserPAC, which performs the same restore;
+// since main discards that call's error, this is also the retry for it.
+func clearOrphanPAC() error {
 	current, err := readAutoConfigURL()
 	if err != nil {
 		return err
